@@ -63,7 +63,8 @@ export function listMoves(filters: MoveFilters) {
       ? [...matched].sort((a, b) => a.name.localeCompare(b.name))
       : filters.sort === 'energy'
         ? [...matched].sort((a, b) => b.energy - a.energy || a.name.localeCompare(b.name))
-        : matched.sort((a, b) => (order.get(a.category) ?? 0) - (order.get(b.category) ?? 0));
+        : // Catalog order: by category, every base move before the variants, so a page is never five versions of one move.
+          matched.sort((a, b) => (order.get(a.category) ?? 0) - (order.get(b.category) ?? 0) || Number(Boolean(a.baseId)) - Number(Boolean(b.baseId)));
   const start = (filters.page - 1) * filters.pageSize;
   // Facets over the domain only, so the category chips always show what exists.
   const facets = categoryCounts(load().moves.filter((move) => !filters.domain || move.domain === filters.domain));
