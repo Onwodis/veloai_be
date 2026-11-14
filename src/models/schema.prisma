@@ -1,0 +1,674 @@
+// PostgreSQL schema.
+//
+// Identity, tenancy and session tables. Media pipeline tables are added in
+// later migrations on top of `Workspace`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Platform-wide role. Workspace-level permissions live on `WorkspaceMember`.
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+enum Role {
+  CREATOR
+  PARTNER
+  ADMIN
+  /// Seeded from env; passes every ADMIN check and owns platform settings.
+  SUPER_ADMIN
+}
+
+enum WorkspaceRole {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+enum SecurityEventType {
+  REGISTERED
+  LOGIN_SUCCEEDED
+  LOGIN_FAILED
+  ACCOUNT_LOCKED
+  TOKEN_REFRESHED
+  TOKEN_REUSE_DETECTED
+  LOGGED_OUT
+  SESSION_REVOKED
+  ALL_SESSIONS_REVOKED
+  ROLE_CHANGED
+  MFA_ENROLLED
+  MFA_FAILED
+  MFA_RECOVERY_USED
+  MFA_RESET_REQUESTED
+  MFA_RESET
+  RECOVERY_CODES_REGENERATED
+  PASSWORD_RESET_REQUESTED
+  PASSWORD_RESET
+}
+
+model User {
+  id               String    @id @default(uuid()) @db.Uuid
+  /// Always stored lower-cased and trimmed.
+  email            String    @unique @db.VarChar(254)
+  passwordHash     String    @map("password_hash")
+  displayName      String    @map("display_name") @db.VarChar(80)
+  role             Role      @default(CREATOR)
+  failedLoginCount Int       @default(0) @map("failed_login_count")
+  lockedUntil      DateTime? @map("locked_until") @db.Timestamptz(3)
+  lastLoginAt      DateTime? @map("last_login_at") @db.Timestamptz(3)
+  /// AES-256-GCM encrypted TOTP secret (base32). Null until enrolled.
+  totpSecretEnc    String?   @map("totp_secret_enc") @db.VarChar(255)
+  /// Set once the first TOTP code is verified; sign-in requires it.
+  totpEnabledAt    DateTime? @map("totp_enabled_at") @db.Timestamptz(3)
+  /// Last accepted 30-second step, so a code can never be replayed.
+  totpLastStep     BigInt?   @map("totp_last_step")
+  /// Object key of the profile picture in R2 (256×256 WebP); null = initials.
+  avatarKey        String?   @map("avatar_key") @db.VarChar(512)
+  /// Asked at sign-up; drives the default avatar when there is no photo.
+  gender           Gender?
+  dateOfBirth      DateTime? @map("date_of_birth") @db.Date
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  refreshTokens  RefreshToken[]
+  memberships    WorkspaceMember[]
+  securityEvents SecurityEvent[]
+  recoveryCodes  RecoveryCode[]
+  authTokens     AuthToken[]
+  activity       ActivityLog[]
+
+  @@map("users")
+}
+
+/// One-time 2FA backup codes. Only the SHA-256 is stored.
+model RecoveryCode {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  codeHash  String    @unique @map("code_hash") @db.Char(64)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("recovery_codes")
+}
+
+enum AuthTokenPurpose {
+  PASSWORD_RESET
+  MFA_RESET
+}
+
+/// Single-use emailed links (password reset, 2FA reset). Only the hash is stored.
+model AuthToken {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @map("user_id") @db.Uuid
+  purpose   AuthTokenPurpose
+  tokenHash String           @unique @map("token_hash") @db.Char(64)
+  expiresAt DateTime         @map("expires_at") @db.Timestamptz(3)
+  usedAt    DateTime?        @map("used_at") @db.Timestamptz(3)
+  createdAt DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+  @@map("auth_tokens")
+}
+
+/* ------------------------------------------------------------------ tokens */
+
+/// Platform-wide settings edited by the super admin (token pricing, task
+/// costs, thresholds, Paystack mode). One JSON document per key.
+model PlatformSetting {
+  key         String   @id @db.VarChar(64)
+  value       Json
+  updatedById String?  @map("updated_by_id") @db.Uuid
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("platform_settings")
+}
+
+/// Token balance per workspace. available = balance - held.
+model TokenWallet {
+  workspaceId       String   @id @map("workspace_id") @db.Uuid
+  balance           Int      @default(0)
+  /// Tokens reserved by tasks that have started but not settled.
+  held              Int      @default(0)
+  lifetimePurchased Int      @default(0) @map("lifetime_purchased")
+  lifetimeUsed      Int      @default(0) @map("lifetime_used")
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("token_wallets")
+}
+
+enum TokenEntryType {
+  PURCHASE
+  GRANT
+  ADJUSTMENT
+  USAGE
+}
+
+/// Append-only record of every balance change.
+model TokenLedger {
+  id           BigInt         @id @default(autoincrement())
+  workspaceId  String         @map("workspace_id") @db.Uuid
+  type         TokenEntryType
+  /// Signed: positive credits, negative debits.
+  amount       Int
+  balanceAfter Int            @map("balance_after")
+  taskType     String?        @map("task_type") @db.VarChar(48)
+  reference    String?        @db.VarChar(128)
+  note         String?        @db.VarChar(255)
+  actorId      String?        @map("actor_id") @db.Uuid
+  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([type, createdAt])
+  @@map("token_ledger")
+}
+
+enum ReservationStatus {
+  HELD
+  SETTLED
+  RELEASED
+  EXPIRED
+}
+
+/// Tokens set aside before a task starts, so work never begins without
+/// enough balance to finish it. Settled with the actual amount used.
+model TokenReservation {
+  id          String            @id @default(uuid()) @db.Uuid
+  workspaceId String            @map("workspace_id") @db.Uuid
+  taskType    String            @map("task_type") @db.VarChar(48)
+  estimated   Int
+  actual      Int?
+  /// Super admin tasks are unmetered: recorded, never held or charged.
+  unmetered   Boolean           @default(false)
+  status      ReservationStatus @default(HELD)
+  input       Json?
+  createdById String            @map("created_by_id") @db.Uuid
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiresAt   DateTime          @map("expires_at") @db.Timestamptz(3)
+  closedAt    DateTime?         @map("closed_at") @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, status])
+  @@index([status, expiresAt])
+  @@map("token_reservations")
+}
+
+enum PaymentMode {
+  TEST
+  LIVE
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  ABANDONED
+}
+
+/// Token purchases through Paystack. `reference` is ours and unique, which
+/// makes crediting idempotent across the webhook and the redirect verify.
+model Payment {
+  id                    String        @id @default(uuid()) @db.Uuid
+  workspaceId           String        @map("workspace_id") @db.Uuid
+  userId                String        @map("user_id") @db.Uuid
+  provider              String        @default("paystack") @db.VarChar(24)
+  mode                  PaymentMode
+  reference             String        @unique @db.VarChar(64)
+  packageId             String        @map("package_id") @db.VarChar(48)
+  tokens                Int
+  amount                Int
+  currency              String        @db.Char(3)
+  status                PaymentStatus @default(PENDING)
+  providerTransactionId String?       @map("provider_transaction_id") @db.VarChar(64)
+  channel               String?       @db.VarChar(32)
+  failureReason         String?       @map("failure_reason") @db.VarChar(255)
+  creditedAt            DateTime?     @map("credited_at") @db.Timestamptz(3)
+  paidAt                DateTime?     @map("paid_at") @db.Timestamptz(3)
+  createdAt             DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([status, createdAt])
+  @@map("payments")
+}
+
+/* ------------------------------------------------------------------ media */
+
+enum ProjectStatus {
+  UPLOADING
+  QUEUED
+  PROCESSING
+  READY
+  FAILED
+  CANCELED
+}
+
+enum PipelineStage {
+  PROBE
+  AUDIO
+  TRANSCRIBE
+  HOOKS
+  RENDER
+  FINALIZE
+}
+
+enum ReelStatus {
+  RENDERING
+  READY
+  FAILED
+}
+
+/// One uploaded source video and the job that turns it into reels.
+model MediaProject {
+  id            String         @id @default(uuid()) @db.Uuid
+  workspaceId   String         @map("workspace_id") @db.Uuid
+  createdById   String         @map("created_by_id") @db.Uuid
+  title         String         @db.VarChar(120)
+  status        ProjectStatus  @default(UPLOADING)
+  stage         PipelineStage?
+  /// 0-100 across the whole pipeline.
+  progress      Int            @default(0)
+  sourceKey     String         @map("source_key") @db.VarChar(512)
+  sourceName    String         @map("source_name") @db.VarChar(255)
+  sourceSize    BigInt         @map("source_size")
+  sourceType    String         @map("source_type") @db.VarChar(100)
+  uploadId      String?        @map("upload_id") @db.VarChar(512)
+  /// Measured by ffprobe once uploaded (the client's estimate is in `options`).
+  durationSec   Float?         @map("duration_sec")
+  width         Int?
+  height        Int?
+  requestedReels Int           @map("requested_reels")
+  /// framing, captionStyle, targetSeconds, declaredDurationSec, language.
+  options       Json
+  reservationId String?        @map("reservation_id") @db.Uuid
+  tokensCharged Int?           @map("tokens_charged")
+  language      String?        @db.VarChar(16)
+  /// Word-level transcript: { words: [{ w, s, e }], text }.
+  transcript    Json?
+  /// Per-stage engine, timing and usage, for the admin "how it works" view.
+  engineLog     Json?          @map("engine_log")
+  error         String?        @db.VarChar(1000)
+  cancelRequested Boolean      @default(false) @map("cancel_requested")
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+  startedAt     DateTime?      @map("started_at") @db.Timestamptz(3)
+  finishedAt    DateTime?      @map("finished_at") @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  reels     Reel[]
+
+  @@index([workspaceId, createdAt])
+  @@index([status])
+  @@map("media_projects")
+}
+
+/// A finished vertical short cut from a project.
+model Reel {
+  id          String     @id @default(uuid()) @db.Uuid
+  projectId   String     @map("project_id") @db.Uuid
+  workspaceId String     @map("workspace_id") @db.Uuid
+  index       Int
+  title       String     @db.VarChar(160)
+  hook        String     @db.VarChar(500)
+  hookScore   Int        @map("hook_score")
+  startSec    Float      @map("start_sec")
+  endSec      Float      @map("end_sec")
+  caption     String     @db.VarChar(1000)
+  hashtags    String[]
+  status      ReelStatus @default(RENDERING)
+  videoKey    String?    @map("video_key") @db.VarChar(512)
+  thumbKey    String?    @map("thumb_key") @db.VarChar(512)
+  sizeBytes   BigInt?    @map("size_bytes")
+  error       String?    @db.VarChar(500)
+  createdAt   DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  project   MediaProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([projectId, index])
+  @@map("reels")
+}
+
+/* ------------------------------------------------------------------ AI engines */
+
+enum AiProvider {
+  ANTHROPIC
+  OPENAI
+  GROQ
+  /// Any other OpenAI-compatible API (base URL required).
+  OPENAI_COMPATIBLE
+}
+
+/// API keys for AI engines. The key is AES-256-GCM encrypted at rest and is
+/// never returned by the API (only its last four characters). ENV rows mirror
+/// keys from the API .env on every boot.
+model AiCredential {
+  id              String     @id @default(uuid()) @db.Uuid
+  provider        AiProvider
+  label           String     @db.VarChar(80)
+  source          SmtpSource @default(DASHBOARD)
+  baseUrl         String?    @map("base_url") @db.VarChar(255)
+  keyEnc          String     @map("key_enc") @db.Text
+  keyLast4        String     @map("key_last4") @db.VarChar(4)
+  /// Model ids this key can use, captured on the last successful verify.
+  models          String[]
+  lastVerifiedAt  DateTime?  @map("last_verified_at") @db.Timestamptz(3)
+  lastVerifyOk    Boolean?   @map("last_verify_ok")
+  lastVerifyError String?    @map("last_verify_error") @db.VarChar(500)
+  createdById     String?    @map("created_by_id") @db.Uuid
+  createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("ai_credentials")
+}
+
+/* ------------------------------------------------------------------ mail */
+
+enum SmtpSource {
+  ENV
+  DASHBOARD
+}
+
+/// SMTP accounts. The ENV row mirrors the SMTP_* variables on every boot;
+/// DASHBOARD rows are added by the super admin. Exactly one is active.
+model SmtpCredential {
+  id             String     @id @default(uuid()) @db.Uuid
+  label          String     @db.VarChar(80)
+  source         SmtpSource @default(DASHBOARD)
+  host           String     @db.VarChar(255)
+  port           Int
+  secure         Boolean    @default(true)
+  username       String     @db.VarChar(255)
+  /// AES-256-GCM encrypted.
+  passwordEnc    String     @map("password_enc") @db.Text
+  fromAddress    String     @map("from_address") @db.VarChar(254)
+  fromName       String?    @map("from_name") @db.VarChar(80)
+  isActive       Boolean    @default(false) @map("is_active")
+  lastVerifiedAt DateTime?  @map("last_verified_at") @db.Timestamptz(3)
+  lastVerifyOk   Boolean?   @map("last_verify_ok")
+  lastVerifyError String?   @map("last_verify_error") @db.VarChar(500)
+  createdById    String?    @map("created_by_id") @db.Uuid
+  createdAt      DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  mails MailLog[]
+
+  @@map("smtp_credentials")
+}
+
+enum MailStatus {
+  SENT
+  FAILED
+}
+
+model MailLog {
+  id           BigInt     @id @default(autoincrement())
+  credentialId String?    @map("credential_id") @db.Uuid
+  to           String     @db.VarChar(254)
+  subject      String     @db.VarChar(255)
+  template     String     @db.VarChar(64)
+  status       MailStatus
+  error        String?    @db.VarChar(500)
+  messageId    String?    @map("message_id") @db.VarChar(255)
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  credential SmtpCredential? @relation(fields: [credentialId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@map("mail_logs")
+}
+
+/* ------------------------------------------------------------------ activity */
+
+enum ActivityAction {
+  CREATE
+  READ
+  UPDATE
+  DELETE
+}
+
+/// Every API request that touches data (CRUD), written after the response.
+model ActivityLog {
+  id         BigInt         @id @default(autoincrement())
+  userId     String?        @map("user_id") @db.Uuid
+  action     ActivityAction
+  method     String         @db.VarChar(8)
+  path       String         @db.VarChar(512)
+  /// Route pattern, e.g. /api/v1/users/:userId/role (groups ids together).
+  route      String?        @db.VarChar(255)
+  statusCode Int            @map("status_code")
+  durationMs Int            @map("duration_ms")
+  ipAddress  String?        @map("ip_address") @db.VarChar(64)
+  userAgent  String?        @map("user_agent") @db.VarChar(512)
+  requestId  String?        @map("request_id") @db.VarChar(64)
+  createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@map("activity_logs")
+}
+
+/// One row per device per UTC day. The device id is a random UUID the web
+/// app keeps in localStorage + a cookie, so a device is counted once a day.
+model SiteVisit {
+  id         BigInt   @id @default(autoincrement())
+  visitorId  String   @map("visitor_id") @db.Uuid
+  day        DateTime @db.Date
+  /// True when this device had never been seen before.
+  firstVisit Boolean  @default(false) @map("first_visit")
+  userId     String?  @map("user_id") @db.Uuid
+  path       String   @db.VarChar(512)
+  referrer   String?  @db.VarChar(512)
+  ipAddress  String?  @map("ip_address") @db.VarChar(64)
+  userAgent  String?  @map("user_agent") @db.VarChar(512)
+  pageViews  Int      @default(1) @map("page_views")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@unique([visitorId, day])
+  @@index([day])
+  @@map("site_visits")
+}
+
+/// One row per issued refresh token. Tokens sharing a `familyId` descend from
+/// a single login; replaying any already-rotated member revokes the family.
+model RefreshToken {
+  id            String    @id @db.Uuid
+  userId        String    @map("user_id") @db.Uuid
+  familyId      String    @map("family_id") @db.Uuid
+  /// SHA-256 of the signed token. The raw token is never persisted.
+  tokenHash     String    @unique @map("token_hash") @db.Char(64)
+  /// Set when this token is rotated; points at its successor.
+  replacedById  String?   @unique @map("replaced_by_id") @db.Uuid
+  revokedAt     DateTime? @map("revoked_at") @db.Timestamptz(3)
+  revokedReason String?   @map("revoked_reason") @db.VarChar(64)
+  userAgent     String?   @map("user_agent") @db.VarChar(512)
+  ipAddress     String?   @map("ip_address") @db.VarChar(64)
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(3)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replacedBy RefreshToken? @relation("Rotation", fields: [replacedById], references: [id], onDelete: SetNull)
+  replaces   RefreshToken? @relation("Rotation")
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+/// Tenant boundary. Every media asset and partnership belongs to a workspace.
+model Workspace {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @db.VarChar(80)
+  slug      String   @unique @db.VarChar(96)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  members      WorkspaceMember[]
+  subscription Subscription?
+  invoices     Invoice[]
+  usage        UsageCounter[]
+  tokenWallet  TokenWallet?
+  tokenLedger  TokenLedger[]
+  reservations TokenReservation[]
+  payments     Payment[]
+  projects     MediaProject[]
+  reels        Reel[]
+
+  @@map("workspaces")
+}
+
+/* ------------------------------------------------------------------ billing */
+
+/// Plan catalogue ids. Prices and limits live in src/config/plans.ts.
+enum PlanId {
+  FREE
+  CREATOR
+  STUDIO
+}
+
+enum BillingInterval {
+  MONTH
+  YEAR
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELED
+}
+
+enum InvoiceStatus {
+  OPEN
+  PAID
+  VOID
+  UNCOLLECTIBLE
+}
+
+enum UsageMetric {
+  PROCESSING_MINUTES
+  REELS_EXPORTED
+  STORAGE_MB
+  /// LLM tokens consumed (hook detection, captions, titles).
+  AI_TOKENS
+  /// Seconds of audio sent to transcription.
+  TRANSCRIPTION_SECONDS
+}
+
+/// One subscription per workspace; billing is per tenant, not per user.
+model Subscription {
+  workspaceId            String             @id @map("workspace_id") @db.Uuid
+  plan                   PlanId             @default(FREE)
+  interval               BillingInterval    @default(MONTH)
+  status                 SubscriptionStatus @default(ACTIVE)
+  currentPeriodStart     DateTime           @map("current_period_start") @db.Timestamptz(3)
+  currentPeriodEnd       DateTime           @map("current_period_end") @db.Timestamptz(3)
+  /// When true the plan reverts to FREE at `currentPeriodEnd`.
+  cancelAtPeriodEnd      Boolean            @default(false) @map("cancel_at_period_end")
+  /// Payment-provider references; null until online payments are wired.
+  provider               String?            @db.VarChar(32)
+  providerCustomerId     String?            @map("provider_customer_id") @db.VarChar(128)
+  providerSubscriptionId String?            @unique @map("provider_subscription_id") @db.VarChar(128)
+  createdAt              DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt              DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+}
+
+model Invoice {
+  id          String        @id @default(uuid()) @db.Uuid
+  workspaceId String        @map("workspace_id") @db.Uuid
+  number      String        @unique @db.VarChar(32)
+  status      InvoiceStatus @default(OPEN)
+  plan        PlanId
+  interval    BillingInterval
+  currency    String        @db.Char(3)
+  /// All amounts in the currency's minor unit (cents, kobo).
+  subtotal    Int
+  tax         Int           @default(0)
+  total       Int
+  periodStart DateTime      @map("period_start") @db.Timestamptz(3)
+  periodEnd   DateTime      @map("period_end") @db.Timestamptz(3)
+  issuedAt    DateTime      @default(now()) @map("issued_at") @db.Timestamptz(3)
+  paidAt      DateTime?     @map("paid_at") @db.Timestamptz(3)
+  hostedUrl   String?       @map("hosted_url") @db.VarChar(512)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, issuedAt])
+  @@map("invoices")
+}
+
+/// Metered usage per workspace per billing period. Incremented by the media
+/// pipeline; read by the billing page and plan-limit checks.
+model UsageCounter {
+  workspaceId String      @map("workspace_id") @db.Uuid
+  metric      UsageMetric
+  periodStart DateTime    @map("period_start") @db.Timestamptz(3)
+  quantity    Int         @default(0)
+  updatedAt   DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, metric, periodStart])
+  @@map("usage_counters")
+}
+
+model WorkspaceMember {
+  workspaceId String        @map("workspace_id") @db.Uuid
+  userId      String        @map("user_id") @db.Uuid
+  role        WorkspaceRole @default(VIEWER)
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, userId])
+  @@index([userId])
+  @@map("workspace_members")
+}
+
+/// Append-only audit trail of authentication events.
+model SecurityEvent {
+  id        BigInt            @id @default(autoincrement())
+  userId    String?           @map("user_id") @db.Uuid
+  type      SecurityEventType
+  ipAddress String?           @map("ip_address") @db.VarChar(64)
+  userAgent String?           @map("user_agent") @db.VarChar(512)
+  metadata  Json?
+  createdAt DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+  @@map("security_events")
+}

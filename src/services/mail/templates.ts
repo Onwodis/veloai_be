@@ -1,0 +1,113 @@
+/**
+ * Transactional email templates. Table-based, inline-styled HTML that renders
+ * in every mainstream client, plus a plain-text part.
+ */
+import { env } from '../../config/env.js';
+
+export interface RenderedMail {
+  subject: string;
+  html: string;
+  text: string;
+  template: string;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
+}
+
+function layout(params: { heading: string; intro: string; cta?: { label: string; url: string }; outro?: string }): string {
+  const name = escapeHtml(env.APP_NAME);
+  const button = params.cta
+    ? `<tr><td style="padding:8px 0 24px"><a href="${escapeHtml(params.cta.url)}" style="display:inline-block;padding:14px 28px;border-radius:12px;background:#6d28d9;background-image:linear-gradient(135deg,#7c3aed,#a21caf);color:#ffffff;font-weight:600;text-decoration:none;font-family:Helvetica,Arial,sans-serif">${escapeHtml(params.cta.label)}</a></td></tr>`
+    : '';
+  return `<!doctype html><html><body style="margin:0;background:#0b1020;padding:32px 12px">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center">
+<table role="presentation" width="560" cellspacing="0" cellpadding="0" style="max-width:560px;background:#111827;border:1px solid #1f2937;border-radius:20px;padding:32px;font-family:Helvetica,Arial,sans-serif;color:#e5e7eb">
+<tr><td style="font-size:13px;letter-spacing:4px;color:#22d3ee;padding-bottom:24px">${name.toUpperCase()}</td></tr>
+<tr><td style="font-size:24px;font-weight:700;color:#ffffff;padding-bottom:12px">${escapeHtml(params.heading)}</td></tr>
+<tr><td style="font-size:15px;line-height:24px;color:#d1d5db;padding-bottom:24px">${escapeHtml(params.intro)}</td></tr>
+${button}
+${params.outro ? `<tr><td style="font-size:13px;line-height:20px;color:#9ca3af">${escapeHtml(params.outro)}</td></tr>` : ''}
+</table></td></tr></table></body></html>`;
+}
+
+export function passwordResetMail(url: string): RenderedMail {
+  const intro = `Someone asked to reset the password for your ${env.APP_NAME} account. The link works once and expires in 30 minutes.`;
+  const outro = "If you didn't ask for this, ignore this email; your password stays the same.";
+  return {
+    template: 'password_reset',
+    subject: `Reset your ${env.APP_NAME} password`,
+    html: layout({ heading: 'Reset your password', intro, cta: { label: 'Choose a new password', url }, outro }),
+    text: `${intro}\n\n${url}\n\n${outro}`,
+  };
+}
+
+export function mfaResetMail(url: string): RenderedMail {
+  const intro = `A request was made to remove two-factor authentication from your ${env.APP_NAME} account because the authenticator app is unavailable. Confirming signs you out everywhere; you will set up a new authenticator at your next sign-in. The link expires in 30 minutes.`;
+  const outro = "If you didn't ask for this, someone knows your password: ignore this email and reset your password now.";
+  return {
+    template: 'mfa_reset',
+    subject: `Confirm two-factor reset for ${env.APP_NAME}`,
+    html: layout({ heading: 'Reset two-factor authentication', intro, cta: { label: 'Confirm 2FA reset', url }, outro }),
+    text: `${intro}\n\n${url}\n\n${outro}`,
+  };
+}
+
+export function llmAlarmMail(params: { usedPercent: number; alarmPercent: number; balance: number; funded: number; url: string; test?: boolean }): RenderedMail {
+  const fmt = (value: number): string => value.toLocaleString('en');
+  const heading = params.test ? 'Test: LLM token alarm' : `${params.usedPercent}% of the LLM token wallet is used`;
+  const intro = `${params.test ? 'This is a test of the alarm. ' : ''}${env.APP_NAME} has used ${fmt(Math.max(0, params.funded - params.balance))} of the ${fmt(params.funded)} LLM tokens you recorded (alarm set at ${params.alarmPercent}%). ${fmt(params.balance)} tokens remain. Buy more credit from your provider, then record it on the launch guard page so the alarm recalibrates.`;
+  const outro = 'Calls are not blocked when the wallet runs out, so provider charges can exceed what you recorded.';
+  return {
+    template: 'llm_alarm',
+    subject: `${params.test ? '[Test] ' : ''}${env.APP_NAME}: LLM token wallet ${params.usedPercent}% used`,
+    html: layout({ heading, intro, cta: { label: 'Open launch guard', url: params.url }, outro }),
+    text: `${intro}\n\n${params.url}\n\n${outro}`,
+  };
+}
+
+/* ------------------------------------------------------------------ cloud storage */
+
+export function storageExpiringMail(params: { pack: string; endsOn: string; daysLeft: number; usedLabel: string; freeLabel: string; url: string }): RenderedMail {
+  const heading = `Your ${params.pack} storage ends ${params.daysLeft <= 1 ? 'tomorrow' : `in ${params.daysLeft} days`}`;
+  const intro = `Your paid cloud storage (${params.pack}) ends on ${params.endsOn}. You are using ${params.usedLabel}; the free allowance is ${params.freeLabel}. Renew it so your saved videos, photos and films stay backed up. If it lapses and you are over the free allowance, the oldest generated files are deleted after a short grace period.`;
+  const outro = 'Prefer not to renew? Download what you want to keep and delete it from your storage page before the date above.';
+  return {
+    template: 'storage_expiring',
+    subject: `${env.APP_NAME}: ${heading.toLowerCase()}`,
+    html: layout({ heading, intro, cta: { label: 'Renew storage', url: params.url }, outro }),
+    text: `${intro}\n\n${params.url}\n\n${outro}`,
+  };
+}
+
+export function storageOverQuotaMail(params: { usedLabel: string; quotaLabel: string; overLabel: string; deleteOn: string; url: string }): RenderedMail {
+  const heading = 'Your cloud storage is over its limit';
+  const intro = `You are using ${params.usedLabel} of ${params.quotaLabel} (${params.overLabel} over). Buy more storage, or download and delete files, before ${params.deleteOn}. After that date the oldest generated files (takes, renders, creations) are deleted automatically until you are back within your allowance. Your own uploads are never deleted automatically.`;
+  return {
+    template: 'storage_over_quota',
+    subject: `${env.APP_NAME}: storage over its limit, action needed by ${params.deleteOn}`,
+    html: layout({ heading, intro, cta: { label: 'Buy storage or free up space', url: params.url } }),
+    text: `${intro}\n\n${params.url}`,
+  };
+}
+
+export function storagePurgedMail(params: { files: number; freedLabel: string; usedLabel: string; quotaLabel: string; url: string }): RenderedMail {
+  const heading = 'Old generated files were removed';
+  const intro = `Your storage stayed over its limit past the grace period, so ${params.files} of the oldest generated file(s) (${params.freedLabel}) were deleted. You now use ${params.usedLabel} of ${params.quotaLabel}. Buy storage to keep more of your work backed up.`;
+  return {
+    template: 'storage_purged',
+    subject: `${env.APP_NAME}: ${params.files} old file(s) removed from your storage`,
+    html: layout({ heading, intro, cta: { label: 'Open storage', url: params.url } }),
+    text: `${intro}\n\n${params.url}`,
+  };
+}
+
+export function testMail(credentialLabel: string): RenderedMail {
+  const intro = `This is a test message from ${env.APP_NAME}, sent through the SMTP account "${credentialLabel}". If you can read it, outgoing mail works.`;
+  return {
+    template: 'smtp_test',
+    subject: `${env.APP_NAME} SMTP test`,
+    html: layout({ heading: 'SMTP is working', intro }),
+    text: intro,
+  };
+}

@@ -1,0 +1,519 @@
+/**
+ * Token wallets, the ledger and task gating.
+ *
+ * Gating ("never start what you can't finish"):
+ *   1. estimate  - tokens for every step of the task, plus a safety buffer
+ *   2. reserve   - an atomic SQL update moves the estimate into `held` only if
+ *                  available (= balance - held) covers max(estimate, minimum
+ *                  start balance). Two tasks racing can never overspend.
+ *   3. settle    - the task reports what it actually used; that is charged,
+ *                  the rest of the hold is released.
+ *      release   - a cancelled/failed task frees its hold untouched.
+ *      expiry    - holds left open past their TTL are released by a sweep.
+ *
+ * The super admin is unmetered: their tasks are recorded (so analytics stay
+ * honest) but never blocked or charged.
+ */
+import type { Prisma, TokenEntryType } from '@prisma/client';
+import { prisma } from '../config/database.js';
+import { ENGINE_TASK_TYPES, estimateTask, type BilledSteps, type Estimate, type EstimateInput } from '../config/tokenSettings.js';
+import type { AuthContext } from '../middleware/authenticate.js';
+import { AppError } from '../utils/AppError.js';
+import { logger } from '../utils/logger.js';
+import { getTokenSettings } from './settings.service.js';
+import { requireMembership } from './workspace.service.js';
+
+type Tx = Prisma.TransactionClient;
+
+export interface WalletView {
+  balance: number;
+  held: number;
+  available: number;
+  lifetimePurchased: number;
+  lifetimeUsed: number;
+}
+
+const view = (wallet: { balance: number; held: number; lifetimePurchased: number; lifetimeUsed: number }): WalletView => ({
+  balance: wallet.balance,
+  held: wallet.held,
+  available: wallet.balance - wallet.held,
+  lifetimePurchased: wallet.lifetimePurchased,
+  lifetimeUsed: wallet.lifetimeUsed,
+});
+
+/** Creates the wallet on first touch, crediting the signup bonus once. */
+async function ensureWallet(db: Tx | typeof prisma, workspaceId: string): Promise<void> {
+  const exists = await db.tokenWallet.findUnique({ where: { workspaceId }, select: { workspaceId: true } });
+  if (exists) return;
+  const { signupBonus } = await getTokenSettings();
+  try {
+    await db.tokenWallet.create({ data: { workspaceId, balance: signupBonus } });
+    if (signupBonus > 0) {
+      await db.tokenLedger.create({
+        data: { workspaceId, type: 'GRANT', amount: signupBonus, balanceAfter: signupBonus, note: 'Welcome tokens' },
+      });
+    }
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'P2002') throw error; // created concurrently
+  }
+}
+
+export async function getWallet(workspaceId: string): Promise<WalletView> {
+  await ensureWallet(prisma, workspaceId);
+  const wallet = await prisma.tokenWallet.findUniqueOrThrow({ where: { workspaceId } });
+  return view(wallet);
+}
+
+/**
+ * Whether this caller's work is free: only the super admin, and only while
+ * the token settings say UNLIMITED (METERED = they pay like a customer).
+ */
+export async function isUnmetered(auth: Pick<AuthContext, 'role'>): Promise<boolean> {
+  if (auth.role !== 'SUPER_ADMIN') return false;
+  return (await getTokenSettings()).superAdminMode !== 'METERED';
+}
+
+/** Balance for any workspace member; super admins are unmetered unless set to METERED. */
+export async function walletFor(auth: AuthContext, workspaceId: string): Promise<{ wallet: WalletView; unmetered: boolean }> {
+  if (auth.role !== 'SUPER_ADMIN') await requireMembership(auth.userId, workspaceId);
+  return { wallet: await getWallet(workspaceId), unmetered: await isUnmetered(auth) };
+}
+
+/** Credits or debits the balance and writes the ledger row, atomically. */
+export async function applyEntry(
+  db: Tx,
+  input: {
+    workspaceId: string;
+    type: TokenEntryType;
+    amount: number;
+    reference?: string;
+    note?: string;
+    actorId?: string;
+    taskType?: string;
+    /** Charge for work already delivered: goes through even if it overdraws (the next task is gated by the negative balance). */
+    allowOverdraw?: boolean;
+  },
+): Promise<number> {
+  await ensureWallet(db, input.workspaceId);
+  const rows = await db.$queryRaw<Array<{ balance: number }>>`
+    UPDATE token_wallets
+    SET balance = balance + ${input.amount},
+        lifetime_purchased = lifetime_purchased + ${input.type === 'PURCHASE' ? input.amount : 0},
+        lifetime_used = lifetime_used + ${input.type === 'USAGE' ? -input.amount : 0},
+        updated_at = now()
+    WHERE workspace_id = ${input.workspaceId}::uuid AND (${input.allowOverdraw === true} OR balance + ${input.amount} >= held)
+    RETURNING balance`;
+  const balance = rows[0]?.balance;
+  if (balance === undefined) throw AppError.badRequest('That adjustment would take the balance below tokens currently reserved');
+  await db.tokenLedger.create({
+    data: {
+      workspaceId: input.workspaceId,
+      type: input.type,
+      amount: input.amount,
+      balanceAfter: balance,
+      reference: input.reference ?? null,
+      note: input.note ?? null,
+      actorId: input.actorId ?? null,
+      taskType: input.taskType ?? null,
+    },
+  });
+  return balance;
+}
+
+/* ------------------------------------------------------------------ preflight */
+
+export interface Preflight {
+  estimate: Estimate;
+  wallet: WalletView;
+  minimumStartBalance: number;
+  canStart: boolean;
+  shortfall: number;
+  unmetered: boolean;
+}
+
+export async function preflight(auth: AuthContext, workspaceId: string, input: EstimateInput, billed?: BilledSteps): Promise<Preflight> {
+  if (auth.role !== 'SUPER_ADMIN') await requireMembership(auth.userId, workspaceId);
+  const [settings, wallet] = await Promise.all([getTokenSettings(), getWallet(workspaceId)]);
+  const estimate = estimateTask(settings, input, billed);
+  const unmetered = settings.superAdminMode !== 'METERED' && auth.role === 'SUPER_ADMIN';
+  const shortfall = unmetered ? 0 : Math.max(0, estimate.requiredToStart - wallet.available);
+  return { estimate, wallet, minimumStartBalance: settings.minimumStartBalance, canStart: shortfall === 0, shortfall, unmetered };
+}
+
+/* ------------------------------------------------------------------ reservations */
+
+export interface ReservationView {
+  id: string;
+  taskType: string;
+  estimated: number;
+  actual: number | null;
+  status: string;
+  unmetered: boolean;
+  createdAt: string;
+  expiresAt: string;
+}
+
+const reservationView = (row: {
+  id: string;
+  taskType: string;
+  estimated: number;
+  actual: number | null;
+  status: string;
+  unmetered: boolean;
+  createdAt: Date;
+  expiresAt: Date;
+}): ReservationView => ({
+  id: row.id,
+  taskType: row.taskType,
+  estimated: row.estimated,
+  actual: row.actual,
+  status: row.status,
+  unmetered: row.unmetered,
+  createdAt: row.createdAt.toISOString(),
+  expiresAt: row.expiresAt.toISOString(),
+});
+
+/**
+ * The gate. Call before creating any asset; throws 402 when the workspace
+ * can't cover the task, so no AI tokens are spent on work that can't finish.
+ */
+export async function reserve(
+  auth: AuthContext,
+  workspaceId: string,
+  taskType: string,
+  input: EstimateInput,
+  /** Steps a resumed job has already paid for; only the rest is reserved. */
+  billed?: BilledSteps,
+): Promise<{ reservation: ReservationView; preflight: Preflight }> {
+  if (auth.role !== 'SUPER_ADMIN') await requireMembership(auth.userId, workspaceId, ['OWNER', 'EDITOR']);
+  const settings = await getTokenSettings();
+  const check = await preflight(auth, workspaceId, input, billed);
+  const expiresAt = new Date(Date.now() + settings.reservationTtlMinutes * 60_000);
+
+  if (check.unmetered) {
+    const row = await prisma.tokenReservation.create({
+      data: { workspaceId, taskType, estimated: check.estimate.reserve, unmetered: true, createdById: auth.userId, expiresAt, input: input as Prisma.InputJsonValue },
+    });
+    return { reservation: reservationView(row), preflight: check };
+  }
+
+  const row = await prisma.$transaction(async (tx) => {
+    const held = await tx.$queryRaw<Array<{ held: number }>>`
+      UPDATE token_wallets SET held = held + ${check.estimate.reserve}, updated_at = now()
+      WHERE workspace_id = ${workspaceId}::uuid AND balance - held >= ${check.estimate.requiredToStart}
+      RETURNING held`;
+    if (held.length === 0) {
+      throw new AppError(
+        402,
+        'INSUFFICIENT_TOKENS',
+        `This task needs ${check.estimate.requiredToStart.toLocaleString('en')} available tokens to start; the workspace has ${check.wallet.available.toLocaleString('en')}. Buy tokens to continue.`,
+        { required: check.estimate.requiredToStart, available: check.wallet.available, shortfall: check.shortfall },
+      );
+    }
+    return tx.tokenReservation.create({
+      data: { workspaceId, taskType, estimated: check.estimate.reserve, createdById: auth.userId, expiresAt, input: input as Prisma.InputJsonValue },
+    });
+  });
+  logger.info({ workspaceId, reservationId: row.id, tokens: row.estimated }, 'tokens reserved');
+  return { reservation: reservationView(row), preflight: check };
+}
+
+/**
+ * The same gate for tasks priced outside the reel estimator (AI video
+ * studio): reserves exactly `amount` tokens (+ the buffer), requiring
+ * max(that, minimumStartBalance) to be available.
+ */
+export async function reserveTokens(
+  auth: AuthContext,
+  workspaceId: string,
+  taskType: string,
+  amount: number,
+  input: Record<string, unknown>,
+): Promise<{ reservation: ReservationView; required: number; available: number }> {
+  if (auth.role !== 'SUPER_ADMIN') await requireMembership(auth.userId, workspaceId, ['OWNER', 'EDITOR']);
+  const [settings, wallet] = await Promise.all([getTokenSettings(), getWallet(workspaceId)]);
+  const estimate = Math.max(1, Math.ceil(amount + (amount * settings.reserveBufferPercent) / 100));
+  const required = Math.max(estimate, settings.minimumStartBalance);
+  const expiresAt = new Date(Date.now() + settings.reservationTtlMinutes * 60_000);
+  const data = { workspaceId, taskType, estimated: estimate, createdById: auth.userId, expiresAt, input: input as Prisma.InputJsonValue };
+
+  if (auth.role === 'SUPER_ADMIN' && settings.superAdminMode !== 'METERED') {
+    const row = await prisma.tokenReservation.create({ data: { ...data, unmetered: true } });
+    return { reservation: reservationView(row), required: 0, available: wallet.available };
+  }
+  await assertDailyEngineCap(workspaceId, taskType, estimate, settings.dailyEngineCap);
+  const row = await prisma.$transaction(async (tx) => {
+    const held = await tx.$queryRaw<Array<{ held: number }>>`
+      UPDATE token_wallets SET held = held + ${estimate}, updated_at = now()
+      WHERE workspace_id = ${workspaceId}::uuid AND balance - held >= ${required}
+      RETURNING held`;
+    if (held.length === 0) {
+      throw new AppError(
+        402,
+        'INSUFFICIENT_TOKENS',
+        `This needs ${required.toLocaleString('en')} available tokens to start; the workspace has ${wallet.available.toLocaleString('en')}. Buy tokens to continue.`,
+        { required, available: wallet.available, shortfall: Math.max(0, required - wallet.available) },
+      );
+    }
+    return tx.tokenReservation.create({ data });
+  });
+  logger.info({ workspaceId, reservationId: row.id, tokens: row.estimated, taskType }, 'tokens reserved');
+  return { reservation: reservationView(row), required, available: wallet.available };
+}
+
+/**
+ * The daily film-engine ceiling: today's engine holds (still open) plus engine charges
+ * (settled) plus this request must stay within `cap`. Refused with 402 DAILY_CAP otherwise.
+ */
+async function assertDailyEngineCap(workspaceId: string, taskType: string, estimate: number, cap: number): Promise<void> {
+  if (cap <= 0 || !(ENGINE_TASK_TYPES as readonly string[]).includes(taskType)) return;
+  const dayStart = new Date();
+  dayStart.setUTCHours(0, 0, 0, 0);
+  const rows = await prisma.tokenReservation.findMany({
+    where: { workspaceId, taskType: { in: [...ENGINE_TASK_TYPES] }, createdAt: { gte: dayStart }, status: { in: ['HELD', 'SETTLED'] }, unmetered: false },
+    select: { status: true, estimated: true, actual: true },
+  });
+  const spent = rows.reduce((sum, row) => sum + (row.status === 'HELD' ? row.estimated : (row.actual ?? 0)), 0);
+  if (spent + estimate <= cap) return;
+  throw new AppError(
+    402,
+    'DAILY_CAP',
+    `Today's film-engine limit is ${cap.toLocaleString('en')} tokens and ${spent.toLocaleString('en')} are already used or held; this needs ${estimate.toLocaleString('en')}. It resets at midnight UTC (the platform admin can raise it).`,
+    { cap, spent, needed: estimate },
+  );
+}
+
+async function closeReservation(reservationId: string, workspaceId: string, outcome: 'SETTLED' | 'RELEASED' | 'EXPIRED', actual = 0, note?: string): Promise<ReservationView> {
+  return prisma.$transaction(async (tx) => {
+    const row = await tx.tokenReservation.findFirst({ where: { id: reservationId, workspaceId } });
+    if (!row) throw AppError.notFound('Reservation');
+    // Never charge more than was reserved: the reserve is the task's ceiling.
+    const charge = outcome === 'SETTLED' ? Math.min(Math.max(0, actual), row.estimated) : 0;
+    if (row.status === 'EXPIRED' && outcome === 'SETTLED') {
+      // The work finished after its hold lapsed (a very long render): the hold was already
+      // returned, so charge the balance directly instead of losing the charge.
+      const updated = await tx.tokenReservation.update({ where: { id: row.id }, data: { status: 'SETTLED', actual: charge, closedAt: new Date() } });
+      if (!row.unmetered && charge > 0) {
+        await applyEntry(tx, {
+          workspaceId,
+          type: 'USAGE',
+          amount: -charge,
+          reference: row.id,
+          taskType: row.taskType,
+          note: `${note ?? row.taskType} (after hold expiry)`.slice(0, 255),
+          allowOverdraw: true,
+        });
+      }
+      logger.warn({ reservationId, charge }, 'settled an expired hold');
+      return reservationView(updated);
+    }
+    if (row.status !== 'HELD') throw AppError.conflict(`This reservation is already ${row.status.toLowerCase()}`);
+
+    const updated = await tx.tokenReservation.update({
+      where: { id: row.id },
+      data: { status: outcome, actual: outcome === 'SETTLED' ? charge : null, closedAt: new Date() },
+    });
+    if (!row.unmetered) {
+      await tx.$executeRaw`UPDATE token_wallets SET held = GREATEST(0, held - ${row.estimated}), updated_at = now() WHERE workspace_id = ${workspaceId}::uuid`;
+      if (charge > 0) {
+        await applyEntry(tx, { workspaceId, type: 'USAGE', amount: -charge, reference: row.id, taskType: row.taskType, ...(note ? { note: note.slice(0, 255) } : {}) });
+      }
+    } else if (outcome === 'SETTLED') {
+      await tx.tokenLedger.create({
+        data: {
+          workspaceId,
+          type: 'USAGE',
+          amount: 0,
+          balanceAfter: (await tx.tokenWallet.findUniqueOrThrow({ where: { workspaceId } })).balance,
+          reference: row.id,
+          taskType: row.taskType,
+          note: `Unmetered (super admin), ${actual} tokens${note ? ` · ${note}` : ''}`.slice(0, 255),
+        },
+      });
+    }
+    return reservationView(updated);
+  });
+}
+
+/**
+ * Marker on holds the browser creates through POST /reservations. Only those
+ * can be released by a user: every other hold belongs to a server job (a fal
+ * render, a pipeline run) and is settled by that job, never by the client.
+ */
+export const CLIENT_HELD = 'clientHeld';
+
+/**
+ * Settling decides what a task costs: only the server (or the super admin) may
+ * do it. A user settling their own hold at 0 would be free work.
+ */
+export async function settle(auth: AuthContext, workspaceId: string, reservationId: string, actualTokens: number): Promise<ReservationView> {
+  if (auth.role !== 'SUPER_ADMIN') throw AppError.forbidden('Charges are settled by the server when the task finishes.');
+  return closeReservation(reservationId, workspaceId, 'SETTLED', actualTokens);
+}
+
+export async function release(auth: AuthContext, workspaceId: string, reservationId: string): Promise<ReservationView> {
+  if (auth.role !== 'SUPER_ADMIN') {
+    await requireMembership(auth.userId, workspaceId, ['OWNER', 'EDITOR']);
+    const row = await prisma.tokenReservation.findFirst({ where: { id: reservationId, workspaceId }, select: { input: true } });
+    if (!row) throw AppError.notFound('Reservation');
+    // Releasing a server job's hold mid-render would let the job finish uncharged.
+    if ((row.input as Record<string, unknown> | null)?.[CLIENT_HELD] !== true) {
+      throw AppError.forbidden('This hold belongs to a running task: cancel the task instead, and the unused tokens are freed.');
+    }
+  }
+  return closeReservation(reservationId, workspaceId, 'RELEASED');
+}
+
+/* ------------------------------------------------------------------ pipeline (server-side) */
+
+/** Settles a reservation from the media worker (no user context). */
+export function settleSystem(reservationId: string, workspaceId: string, actualTokens: number, note?: string): Promise<ReservationView> {
+  return closeReservation(reservationId, workspaceId, 'SETTLED', actualTokens, note);
+}
+
+export function releaseSystem(reservationId: string, workspaceId: string): Promise<ReservationView> {
+  return closeReservation(reservationId, workspaceId, 'RELEASED');
+}
+
+/**
+ * Grows a hold when the measured job is bigger than the estimate it was
+ * reserved for (e.g. the real video is longer than the browser reported).
+ * Atomic: succeeds only if the extra tokens are available right now.
+ */
+export async function extendReservation(reservationId: string, workspaceId: string, newEstimate: number): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    const row = await tx.tokenReservation.findFirst({ where: { id: reservationId, workspaceId, status: 'HELD' } });
+    if (!row) return false;
+    const extra = newEstimate - row.estimated;
+    if (extra <= 0 || row.unmetered) {
+      if (row.unmetered && extra > 0) await tx.tokenReservation.update({ where: { id: row.id }, data: { estimated: newEstimate } });
+      return true;
+    }
+    const grown = await tx.$queryRaw<Array<{ held: number }>>`
+      UPDATE token_wallets SET held = held + ${extra}, updated_at = now()
+      WHERE workspace_id = ${workspaceId}::uuid AND balance - held >= ${extra}
+      RETURNING held`;
+    if (grown.length === 0) return false;
+    await tx.tokenReservation.update({ where: { id: row.id }, data: { estimated: newEstimate } });
+    return true;
+  });
+}
+
+/** Keeps a running job's hold from expiring (called at each pipeline stage). */
+export async function touchReservation(reservationId: string): Promise<void> {
+  const { reservationTtlMinutes } = await getTokenSettings();
+  await prisma.tokenReservation.updateMany({
+    where: { id: reservationId, status: 'HELD' },
+    data: { expiresAt: new Date(Date.now() + reservationTtlMinutes * 60_000) },
+  });
+}
+
+/** Releases holds whose task never reported back. Run on an interval. */
+export async function expireReservations(): Promise<number> {
+  const stale = await prisma.tokenReservation.findMany({
+    where: { status: 'HELD', expiresAt: { lt: new Date() } },
+    select: { id: true, workspaceId: true },
+    take: 200,
+  });
+  for (const row of stale) {
+    await closeReservation(row.id, row.workspaceId, 'EXPIRED').catch((error: unknown) => logger.error({ err: error, reservationId: row.id }, 'reservation expiry failed'));
+  }
+  return stale.length;
+}
+
+/* ------------------------------------------------------------------ overview + admin */
+
+export async function overview(auth: AuthContext, workspaceId: string) {
+  const role = auth.role === 'SUPER_ADMIN' ? 'OWNER' : await requireMembership(auth.userId, workspaceId);
+  const [settings, wallet, ledger, payments, reservations] = await Promise.all([
+    getTokenSettings(),
+    getWallet(workspaceId),
+    prisma.tokenLedger.findMany({ where: { workspaceId }, orderBy: { createdAt: 'desc' }, take: 30 }),
+    prisma.payment.findMany({ where: { workspaceId }, orderBy: { createdAt: 'desc' }, take: 15 }),
+    prisma.tokenReservation.findMany({ where: { workspaceId, status: 'HELD' }, orderBy: { createdAt: 'desc' }, take: 10 }),
+  ]);
+  return {
+    wallet,
+    // The super admin can always buy (METERED mode is for living the customer experience).
+    canBuy: role === 'OWNER' || auth.role === 'SUPER_ADMIN',
+    unmetered: auth.role === 'SUPER_ADMIN' && settings.superAdminMode !== 'METERED',
+    superAdminMode: auth.role === 'SUPER_ADMIN' ? settings.superAdminMode : undefined,
+    mode: settings.paystackMode,
+    currency: settings.currency,
+    packages: settings.packages,
+    taskCosts: settings.taskCosts,
+    minimumStartBalance: settings.minimumStartBalance,
+    reserveBufferPercent: settings.reserveBufferPercent,
+    ledger: ledger.map((row) => ({
+      id: row.id.toString(),
+      type: row.type,
+      amount: row.amount,
+      balanceAfter: row.balanceAfter,
+      taskType: row.taskType,
+      reference: row.reference,
+      note: row.note,
+      createdAt: row.createdAt.toISOString(),
+    })),
+    payments: payments.map((row) => ({
+      id: row.id,
+      reference: row.reference,
+      mode: row.mode,
+      packageId: row.packageId,
+      tokens: row.tokens,
+      amount: row.amount,
+      currency: row.currency,
+      status: row.status,
+      channel: row.channel,
+      paidAt: row.paidAt?.toISOString() ?? null,
+      createdAt: row.createdAt.toISOString(),
+    })),
+    reservations: reservations.map(reservationView),
+  };
+}
+
+export async function grant(actorId: string, workspaceId: string, amount: number, note: string): Promise<WalletView> {
+  const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { id: true } });
+  if (!workspace) throw AppError.notFound('Workspace');
+  await prisma.$transaction((tx) => applyEntry(tx, { workspaceId, type: amount >= 0 ? 'GRANT' : 'ADJUSTMENT', amount, note, actorId }));
+  logger.info({ actorId, workspaceId, amount }, 'tokens granted/adjusted by super admin');
+  return getWallet(workspaceId);
+}
+
+export async function listWorkspacesWithWallets(search: string | undefined, page: number, pageSize: number) {
+  const where: Prisma.WorkspaceWhereInput = search
+    ? {
+        OR: [
+          { name: { contains: search, mode: 'insensitive' } },
+          { slug: { contains: search, mode: 'insensitive' } },
+          { members: { some: { user: { email: { contains: search, mode: 'insensitive' } } } } },
+        ],
+      }
+    : {};
+  const [total, rows] = await prisma.$transaction([
+    prisma.workspace.count({ where }),
+    prisma.workspace.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      include: {
+        tokenWallet: true,
+        members: { where: { role: 'OWNER' }, take: 1, include: { user: { select: { email: true, displayName: true } } } },
+      },
+    }),
+  ]);
+  return {
+    items: rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      owner: row.members[0]?.user ?? null,
+      wallet: row.tokenWallet ? view(row.tokenWallet) : null,
+      createdAt: row.createdAt.toISOString(),
+    })),
+    page,
+    pageSize,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / pageSize)),
+  };
+}
