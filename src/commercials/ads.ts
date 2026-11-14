@@ -129,6 +129,7 @@ export async function view(auth: AuthContext, workspaceId: string, projectId: st
       onScreenText: line?.onScreenText ?? null,
       selectedTakeId: scene.selectedTakeId,
       takes: scene.takes,
+      moves: scene.moves,
       voice: voice?.url ? { url: voice.url, durationSec: Number((voice.meta as { durationSec?: number }).durationSec ?? 0) } : null,
     };
   });
@@ -308,16 +309,20 @@ async function writeShotList(workspaceId: string, projectId: string, ad: AdRow, 
     .join('. ');
   // Old takes of replaced scenes: running ones stop (their files go with them), finished ones' files go now.
   const oldTakes = await studio.finishedTakeIds(projectId);
+  // Moves placed on the cast stay with their scene number across script rewrites.
+  const keptMoves = new Map(
+    (await sql<{ position: number; moves: unknown[] }[]>`SELECT position, moves FROM studio_scenes WHERE project_id = ${projectId}`).map((row) => [row.position, row.moves]),
+  );
   await sql.begin(async (tx) => {
     await tx`UPDATE studio_takes SET status = 'CANCELED', finished_at = now() WHERE project_id = ${projectId} AND status IN ('QUEUED', 'KEYFRAME', 'ANIMATING', 'LIPSYNC', 'STORING')`;
     await tx`DELETE FROM studio_scenes WHERE project_id = ${projectId}`;
     for (const [position, scene] of script.scenes.entries()) {
       const prompt = [scene.visual, scene.camera && `Camera: ${scene.camera}`, look, scene.onScreenText && `On-screen text: "${scene.onScreenText}"`].filter(Boolean).join('. ');
       await tx`
-        INSERT INTO studio_scenes (project_id, position, kind, description, prompt, shot, transition, duration_sec, features_subject, lip_sync, lyric)
+        INSERT INTO studio_scenes (project_id, position, kind, description, prompt, shot, transition, duration_sec, features_subject, lip_sync, lyric, moves)
         VALUES (${projectId}, ${position}, 'STORY', ${scene.visual.slice(0, 1000)}, ${prompt.slice(0, 2000)}, 'medium', 'cut', ${scene.seconds},
           -- Ad cast are written characters (synthesised from the rules), not the user's likeness.
-          false, false, ${(scene.line ? `${scene.speaker ? `${scene.speaker}: ` : ''}${scene.line}` : '').slice(0, 300) || null})`;
+          false, false, ${(scene.line ? `${scene.speaker ? `${scene.speaker}: ` : ''}${scene.line}` : '').slice(0, 300) || null}, ${json(keptMoves.get(position) ?? [])})`;
     }
   });
   await studio.dropTakeFiles(workspaceId, projectId, oldTakes);

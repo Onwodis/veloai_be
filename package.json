@@ -12,6 +12,7 @@
     "dev": "tsx watch --clear-screen=false src/server.ts",
     "build": "prisma generate && tsc -p tsconfig.json && node -e \"require('fs').cpSync('src/studio/migrations','dist/studio/migrations',{recursive:true})\"",
     "studio:migrate": "tsx src/scripts/studio-migrate.ts",
+    "moves:build": "tsx src/moves/build.ts",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:generate": "prisma generate",

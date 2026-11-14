@@ -11,6 +11,7 @@
  */
 import type { AuthContext } from '../middleware/authenticate.js';
 import { deleteObject, deletePrefix, headObject, keys, presignPut, readUrl } from '../services/storage.service.js';
+import { withMoves } from '../moves/prompt.js';
 import { releaseSystem, reserveTokens, settleSystem } from '../services/token.service.js';
 import { requireMembership } from '../services/workspace.service.js';
 import { meContext, mentionsMe, replaceMe } from '../likeness/service.js';
@@ -181,6 +182,7 @@ async function fullView(project: ProjectRow) {
         emotion: scene.emotion ?? null,
         intensity: scene.intensity ?? null,
         voiceAssetId: scene.voiceAssetId ?? null,
+        moves: scene.moves ?? [],
         approvedAt: iso(scene.approvedAt ?? null),
         shotApprovedAt: iso(scene.shotApprovedAt ?? null),
         startsAt: starts[index] ?? 0,
@@ -682,7 +684,8 @@ export async function generate(auth: AuthContext, workspaceId: string, projectId
         creative: mvOptions?.creativeMode ?? false,
         musicVideo: true,
         description: scene.description,
-        prompt: scene.prompt ?? scene.description,
+        // The characters' moves, woven in as human performance direction.
+        prompt: withMoves(scene.prompt ?? scene.description, scene.moves),
         shot: scene.shot,
         durationSec: scene.durationSec,
         featuresSubject: cast.referenceKeys.length > 0,
@@ -710,7 +713,7 @@ export async function generate(auth: AuthContext, workspaceId: string, projectId
       kind: project.kind,
       aspect: project.aspect,
       description: replaceMe(scene.description),
-      prompt: replaceMe(scene.prompt ?? scene.description),
+      prompt: withMoves(replaceMe(scene.prompt ?? scene.description), scene.moves),
       shot: scene.shot,
       durationSec: scene.durationSec,
       featuresSubject,

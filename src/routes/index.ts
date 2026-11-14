@@ -23,6 +23,7 @@ import { credentialsRouter } from '../vault/routes.js';
 import { launchRouter } from '../launch/routes.js';
 import { musicVideoRouter } from '../musicvideo/routes.js';
 import { adRouter, companyRouter } from '../commercials/routes.js';
+import { movesRouter, sceneMovesRouter } from '../moves/routes.js';
 import { adminSupportRouter, adminUserRouter, commandCenterRouter, supportRouter } from '../admin360/routes.js';
 
 export const healthRouter: Router = Router();
@@ -46,6 +47,8 @@ apiRouter.use('/workspaces/:workspaceId/studio', studioRouter);
 apiRouter.use('/workspaces/:workspaceId/music-videos', musicVideoRouter);
 apiRouter.use('/workspaces/:workspaceId/companies', companyRouter);
 apiRouter.use('/workspaces/:workspaceId/ads', adRouter);
+apiRouter.use('/workspaces/:workspaceId/scene-moves', sceneMovesRouter);
+apiRouter.use('/moves', movesRouter);
 apiRouter.use('/admin/studio', adminStudioRouter);
 apiRouter.use('/admin/storage', adminStorageRouter);
 apiRouter.use('/admin/credentials', credentialsRouter);

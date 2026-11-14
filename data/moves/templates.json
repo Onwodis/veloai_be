@@ -1,0 +1,883 @@
+{
+  "version": 1,
+  "templates": [
+    {
+      "id": "TP-MI-001",
+      "name": "Cold Open Silhouette",
+      "domain": "MUSIC",
+      "kind": "INTRO",
+      "direction": "The artist stands motionless in silhouette against a hazy backlight; on the first vocal they step forward into a soft key light.",
+      "camera": "Static wide, slow push-in on the step",
+      "light": "Hard backlight, haze, soft key on the reveal",
+      "seconds": 6,
+      "moods": [
+        "MYSTERIOUS",
+        "CONFIDENT"
+      ],
+      "whenToUse": "Mysterious or confident songs that open with a sparse intro.",
+      "tags": []
+    },
+    {
+      "id": "TP-MI-002",
+      "name": "City Wake-Up",
+      "domain": "MUSIC",
+      "kind": "INTRO",
+      "direction": "Dawn over the city: an empty street, a shop shutter rolling up, then the artist walking out of a doorway pulling on a jacket.",
+      "camera": "Handheld, eye level, following",
+      "light": "Blue-hour natural light",
+      "seconds": 8,
+      "moods": [
+        "NOSTALGIC",
+        "HAPPY"
+      ],
+      "whenToUse": "Hometown and hustle songs.",
+      "tags": [
+        "city"
+      ]
+    },
+    {
+      "id": "TP-MI-003",
+      "name": "Studio Voice-Note",
+      "domain": "MUSIC",
+      "kind": "INTRO",
+      "direction": "Inside a small studio the artist presses record on a phone, hums the melody, laughs, and the beat drops in.",
+      "camera": "Close handheld, shallow focus",
+      "light": "Practical studio lamps",
+      "seconds": 6,
+      "moods": [
+        "PLAYFUL",
+        "NOSTALGIC"
+      ],
+      "whenToUse": "Behind-the-music intros, Afro and R&B.",
+      "tags": []
+    },
+    {
+      "id": "TP-MI-004",
+      "name": "Car Interior Monologue",
+      "domain": "MUSIC",
+      "kind": "INTRO",
+      "direction": "Night drive: the artist in the passenger seat, street lights sliding across the face, speaking the first line to the window.",
+      "camera": "Static on the dash, profile",
+      "light": "Moving street light, dark cabin",
+      "seconds": 6,
+      "moods": [
+        "NOSTALGIC",
+        "SAD",
+        "MYSTERIOUS"
+      ],
+      "whenToUse": "Reflective rap and R&B intros.",
+      "tags": []
+    },
+    {
+      "id": "TP-MI-005",
+      "name": "Crowd Roar Build",
+      "domain": "MUSIC",
+      "kind": "INTRO",
+      "direction": "A packed venue chanting the artist's name in darkness; a single spotlight finds the empty mic.",
+      "camera": "Wide from the back of the crowd",
+      "light": "Dark house, single spot",
+      "seconds": 6,
+      "moods": [
+        "TRIUMPHANT",
+        "HAPPY"
+      ],
+      "whenToUse": "Anthems and live-feel videos.",
+      "tags": [
+        "crowd"
+      ]
+    },
+    {
+      "id": "TP-MI-006",
+      "name": "Letter on the Table",
+      "domain": "MUSIC",
+      "kind": "INTRO",
+      "direction": "Macro on a handwritten letter and a ring on a wooden table; a hand picks up the ring as the piano starts.",
+      "camera": "Macro slider",
+      "light": "Window light, warm",
+      "seconds": 5,
+      "moods": [
+        "ROMANTIC",
+        "SAD",
+        "NOSTALGIC"
+      ],
+      "whenToUse": "Love and heartbreak ballads.",
+      "tags": []
+    },
+    {
+      "id": "TP-MI-007",
+      "name": "Village Morning",
+      "domain": "MUSIC",
+      "kind": "INTRO",
+      "direction": "Smoke from a cooking fire, children running, an elder nodding as the artist walks through the compound.",
+      "camera": "Gimbal, slow, wide to medium",
+      "light": "Morning sun, natural haze",
+      "seconds": 8,
+      "moods": [
+        "NOSTALGIC",
+        "HAPPY",
+        "SPIRITUAL"
+      ],
+      "whenToUse": "Roots, highlife and heritage songs.",
+      "tags": []
+    },
+    {
+      "id": "TP-MI-008",
+      "name": "Mirror Prep",
+      "domain": "MUSIC",
+      "kind": "INTRO",
+      "direction": "Backstage mirror: the artist fixes their collar, meets their own eyes, and breathes out.",
+      "camera": "Over-the-shoulder into the mirror",
+      "light": "Mirror bulbs",
+      "seconds": 5,
+      "moods": [
+        "CONFIDENT",
+        "SPIRITUAL"
+      ],
+      "whenToUse": "Confidence and comeback songs.",
+      "tags": []
+    },
+    {
+      "id": "TP-MI-009",
+      "name": "Rain on Glass",
+      "domain": "MUSIC",
+      "kind": "INTRO",
+      "direction": "Rain streaks a window; behind it the artist sits on a bed looking out, unmoving.",
+      "camera": "Through the window, static",
+      "light": "Grey daylight",
+      "seconds": 6,
+      "moods": [
+        "SAD"
+      ],
+      "whenToUse": "Sad and reflective songs.",
+      "tags": [
+        "rain"
+      ]
+    },
+    {
+      "id": "TP-MI-010",
+      "name": "Church Doors",
+      "domain": "MUSIC",
+      "kind": "INTRO",
+      "direction": "Heavy church doors swing open onto a choir mid-hum; the artist walks up the aisle.",
+      "camera": "Steadicam down the aisle",
+      "light": "Stained-glass daylight",
+      "seconds": 8,
+      "moods": [
+        "SPIRITUAL"
+      ],
+      "whenToUse": "Gospel and spiritual songs.",
+      "tags": []
+    },
+    {
+      "id": "TP-MI-011",
+      "name": "Phone Screen Story",
+      "domain": "MUSIC",
+      "kind": "INTRO",
+      "direction": "A phone screen lights up with a message; the thumb hovers, deletes, types again; the artist's face lit by the screen.",
+      "camera": "Close-up, screen and face",
+      "light": "Screen glow in a dark room",
+      "seconds": 5,
+      "moods": [
+        "ROMANTIC",
+        "SAD",
+        "PLAYFUL"
+      ],
+      "whenToUse": "Modern love and situationship songs.",
+      "tags": []
+    },
+    {
+      "id": "TP-MI-012",
+      "name": "Dance Floor Hush",
+      "domain": "MUSIC",
+      "kind": "INTRO",
+      "direction": "A dance floor freezes mid-move as the music cuts; the artist walks through the frozen dancers.",
+      "camera": "Gimbal through the crowd",
+      "light": "Club lights, frozen strobe",
+      "seconds": 6,
+      "moods": [
+        "CONFIDENT",
+        "PLAYFUL"
+      ],
+      "whenToUse": "Club and Afro-house intros.",
+      "tags": [
+        "dancers"
+      ]
+    },
+    {
+      "id": "TP-MS-001",
+      "name": "One-Light Performance",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "The artist performs the verse to camera in a dark room lit by one bare bulb swinging gently overhead.",
+      "camera": "Medium close, locked off",
+      "light": "Single practical bulb",
+      "seconds": 8,
+      "moods": [
+        "MYSTERIOUS",
+        "SAD",
+        "DEFIANT"
+      ],
+      "whenToUse": "Raw, honest verses.",
+      "tags": []
+    },
+    {
+      "id": "TP-MS-002",
+      "name": "Rooftop Golden Hour",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "Performance on a rooftop at golden hour, the city behind, wind in the clothes.",
+      "camera": "Slow orbit, medium",
+      "light": "Low sun, rim light",
+      "seconds": 8,
+      "moods": [
+        "TRIUMPHANT",
+        "NOSTALGIC",
+        "HAPPY"
+      ],
+      "whenToUse": "Uplifting choruses.",
+      "tags": []
+    },
+    {
+      "id": "TP-MS-003",
+      "name": "Living-Room Session",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "The band plays in a lived-in living room; the artist sings on the sofa arm, friends listening.",
+      "camera": "Handheld, roaming",
+      "light": "Warm lamps, window light",
+      "seconds": 10,
+      "moods": [
+        "HAPPY",
+        "NOSTALGIC"
+      ],
+      "whenToUse": "Acoustic and soul.",
+      "tags": []
+    },
+    {
+      "id": "TP-MS-004",
+      "name": "Neon Alley",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "The artist walks and sings through a narrow alley of neon signs, steam rising from a grate.",
+      "camera": "Tracking backward, medium",
+      "light": "Neon colour, wet ground reflections",
+      "seconds": 8,
+      "moods": [
+        "MYSTERIOUS",
+        "SENSUAL"
+      ],
+      "whenToUse": "Late-night R&B and trap.",
+      "tags": []
+    },
+    {
+      "id": "TP-MS-005",
+      "name": "Market Chorus",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "The chorus erupts in a busy market: traders join in, a crowd forms and dances around the artist.",
+      "camera": "Wide crane down to medium",
+      "light": "Midday sun, colourful canopies",
+      "seconds": 10,
+      "moods": [
+        "HAPPY"
+      ],
+      "whenToUse": "Afrobeats and highlife choruses.",
+      "tags": [
+        "crowd"
+      ]
+    },
+    {
+      "id": "TP-MS-006",
+      "name": "Stairwell Echo",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "The artist sings in a concrete stairwell, voice echoing, light from a window high above.",
+      "camera": "Low angle looking up",
+      "light": "Single shaft of daylight",
+      "seconds": 6,
+      "moods": [
+        "SAD",
+        "SPIRITUAL",
+        "MYSTERIOUS"
+      ],
+      "whenToUse": "Bridges and stripped moments.",
+      "tags": []
+    },
+    {
+      "id": "TP-MS-007",
+      "name": "Car Bonnet Hang",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "Friends sit on car bonnets at a lookout over the city at night, the artist singing among them.",
+      "camera": "Wide, slow dolly",
+      "light": "City glow, practical torches",
+      "seconds": 8,
+      "moods": [
+        "NOSTALGIC",
+        "HAPPY"
+      ],
+      "whenToUse": "Friendship and summer songs.",
+      "tags": [
+        "crew"
+      ]
+    },
+    {
+      "id": "TP-MS-008",
+      "name": "Bedroom Dawn",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "Morning light through curtains; the artist sings sitting on an unmade bed, sheets around them.",
+      "camera": "Static medium, slight drift",
+      "light": "Soft window light",
+      "seconds": 8,
+      "moods": [
+        "ROMANTIC",
+        "SENSUAL"
+      ],
+      "whenToUse": "Intimate love songs.",
+      "tags": []
+    },
+    {
+      "id": "TP-MS-009",
+      "name": "Warehouse Crew",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "The crew dances in an empty warehouse with one big light behind them, dust in the air.",
+      "camera": "Wide low angle",
+      "light": "Hard backlight, haze",
+      "seconds": 10,
+      "moods": [
+        "CONFIDENT",
+        "DEFIANT"
+      ],
+      "whenToUse": "Dance breaks and hype choruses.",
+      "tags": [
+        "dancers"
+      ]
+    },
+    {
+      "id": "TP-MS-010",
+      "name": "Beach Night Fire",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "A bonfire on the beach at night, friends around it, the artist singing and the waves behind.",
+      "camera": "Handheld, close and wide",
+      "light": "Firelight",
+      "seconds": 10,
+      "moods": [
+        "ROMANTIC",
+        "NOSTALGIC",
+        "HAPPY"
+      ],
+      "whenToUse": "Love and nostalgia.",
+      "tags": []
+    },
+    {
+      "id": "TP-MS-011",
+      "name": "Studio Live Take",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "The full band records live in a studio, the artist in a booth, everyone watching each other through the glass.",
+      "camera": "Multiple handheld angles",
+      "light": "Studio practicals",
+      "seconds": 10,
+      "moods": [
+        "CONFIDENT",
+        "NOSTALGIC"
+      ],
+      "whenToUse": "Authentic performance videos.",
+      "tags": [
+        "band"
+      ]
+    },
+    {
+      "id": "TP-MS-012",
+      "name": "Rain Street Performance",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "The artist sings in the middle of an empty street in pouring rain, unmoving, as cars pass slowly.",
+      "camera": "Wide, slow push-in",
+      "light": "Street lights, rain",
+      "seconds": 8,
+      "moods": [
+        "SAD",
+        "DEFIANT"
+      ],
+      "whenToUse": "Emotional peaks.",
+      "tags": [
+        "rain"
+      ]
+    },
+    {
+      "id": "TP-MS-013",
+      "name": "Barber Shop Verse",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "The artist raps from the barber chair, the barber working, the shop reacting to the lines.",
+      "camera": "Handheld, mirror reflections",
+      "light": "Fluorescent shop light",
+      "seconds": 8,
+      "moods": [
+        "PLAYFUL",
+        "CONFIDENT"
+      ],
+      "whenToUse": "Storytelling rap and Afro verses.",
+      "tags": []
+    },
+    {
+      "id": "TP-MS-014",
+      "name": "Wedding Dance",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "A wedding reception: the couple on the dance floor, the artist singing among the guests.",
+      "camera": "Gimbal around the couple",
+      "light": "Warm string lights",
+      "seconds": 10,
+      "moods": [
+        "ROMANTIC",
+        "HAPPY"
+      ],
+      "whenToUse": "Love songs and celebration.",
+      "tags": []
+    },
+    {
+      "id": "TP-MS-015",
+      "name": "Field of Grass",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "The artist walks through tall grass at sunset, fingertips brushing the tops.",
+      "camera": "Wide then tracking",
+      "light": "Sunset backlight",
+      "seconds": 8,
+      "moods": [
+        "NOSTALGIC",
+        "ROMANTIC",
+        "CALM"
+      ],
+      "whenToUse": "Peaceful and nostalgic bridges.",
+      "tags": []
+    },
+    {
+      "id": "TP-MS-016",
+      "name": "Mirror Room",
+      "domain": "MUSIC",
+      "kind": "SCENE",
+      "direction": "The artist performs surrounded by mirrors, the reflections multiplying every move.",
+      "camera": "Slow dolly",
+      "light": "Clean soft light",
+      "seconds": 8,
+      "moods": [
+        "MYSTERIOUS",
+        "SENSUAL"
+      ],
+      "whenToUse": "Self-reflection and identity songs.",
+      "tags": []
+    },
+    {
+      "id": "TP-MO-001",
+      "name": "Fade to Silhouette",
+      "domain": "MUSIC",
+      "kind": "OUTRO",
+      "direction": "The artist walks away into the backlight until only the silhouette remains, then the light fades.",
+      "camera": "Static wide",
+      "light": "Backlight fading",
+      "seconds": 6,
+      "moods": [
+        "SPIRITUAL",
+        "MYSTERIOUS"
+      ],
+      "whenToUse": "Spiritual or mysterious endings.",
+      "tags": []
+    },
+    {
+      "id": "TP-MO-002",
+      "name": "Empty Stage",
+      "domain": "MUSIC",
+      "kind": "OUTRO",
+      "direction": "The crowd has gone; the artist sits alone on the edge of the stage, mic beside them, and smiles.",
+      "camera": "Slow pull-back",
+      "light": "Work lights",
+      "seconds": 6,
+      "moods": [
+        "NOSTALGIC",
+        "TRIUMPHANT"
+      ],
+      "whenToUse": "After-the-show endings.",
+      "tags": []
+    },
+    {
+      "id": "TP-MO-003",
+      "name": "Morning After",
+      "domain": "MUSIC",
+      "kind": "OUTRO",
+      "direction": "Sunlight in the room the party was in; the artist picks up a cup, laughs to themselves, opens the curtains.",
+      "camera": "Handheld, gentle",
+      "light": "Bright morning light",
+      "seconds": 6,
+      "moods": [
+        "HAPPY",
+        "NOSTALGIC"
+      ],
+      "whenToUse": "Party and celebration songs.",
+      "tags": []
+    },
+    {
+      "id": "TP-MO-004",
+      "name": "Hands Apart",
+      "domain": "MUSIC",
+      "kind": "OUTRO",
+      "direction": "Two hands slowly let go of each other; one stays in frame.",
+      "camera": "Macro",
+      "light": "Soft window light",
+      "seconds": 5,
+      "moods": [
+        "SAD",
+        "ROMANTIC"
+      ],
+      "whenToUse": "Breakup and goodbye songs.",
+      "tags": []
+    },
+    {
+      "id": "TP-MO-005",
+      "name": "Drive Into the Dawn",
+      "domain": "MUSIC",
+      "kind": "OUTRO",
+      "direction": "The car drives away down an empty road toward the sunrise.",
+      "camera": "Static wide from behind",
+      "light": "Dawn light",
+      "seconds": 6,
+      "moods": [
+        "NOSTALGIC",
+        "TRIUMPHANT"
+      ],
+      "whenToUse": "New beginnings.",
+      "tags": []
+    },
+    {
+      "id": "TP-MO-006",
+      "name": "Final Look to Lens",
+      "domain": "MUSIC",
+      "kind": "OUTRO",
+      "direction": "The artist looks into the lens for a long moment, a small nod, and the frame cuts to black.",
+      "camera": "Close-up, locked off",
+      "light": "Soft key",
+      "seconds": 5,
+      "moods": [
+        "CONFIDENT",
+        "ROMANTIC"
+      ],
+      "whenToUse": "Direct, personal endings.",
+      "tags": []
+    },
+    {
+      "id": "TP-MO-007",
+      "name": "Credits Over Behind-the-Scenes",
+      "domain": "MUSIC",
+      "kind": "OUTRO",
+      "direction": "Behind-the-scenes clips: laughter, mistakes, the crew hugging, while the instrumental plays out.",
+      "camera": "Mixed handheld",
+      "light": "Mixed",
+      "seconds": 10,
+      "moods": [
+        "HAPPY",
+        "PLAYFUL"
+      ],
+      "whenToUse": "Feel-good endings.",
+      "tags": []
+    },
+    {
+      "id": "TP-MO-008",
+      "name": "Choir Final Hold",
+      "domain": "MUSIC",
+      "kind": "OUTRO",
+      "direction": "The choir holds the last chord, the artist with arms open, the light rising to white.",
+      "camera": "Slow crane up",
+      "light": "Light rising to white",
+      "seconds": 6,
+      "moods": [
+        "SPIRITUAL"
+      ],
+      "whenToUse": "Gospel finales.",
+      "tags": []
+    },
+    {
+      "id": "TP-AI-001",
+      "name": "Problem in Two Seconds",
+      "domain": "AD",
+      "kind": "INTRO",
+      "direction": "Open on the problem the product solves, shown in one relatable moment with a frustrated sigh.",
+      "camera": "Close-up, handheld",
+      "light": "Natural, everyday",
+      "seconds": 3,
+      "moods": [
+        "PLAYFUL"
+      ],
+      "whenToUse": "Problem-solution ads; stops the scroll.",
+      "tags": []
+    },
+    {
+      "id": "TP-AI-002",
+      "name": "Product Drop",
+      "domain": "AD",
+      "kind": "INTRO",
+      "direction": "The product drops into frame onto a clean surface with a satisfying thud.",
+      "camera": "Overhead or macro",
+      "light": "Clean studio light",
+      "seconds": 2,
+      "moods": [
+        "CONFIDENT"
+      ],
+      "whenToUse": "Product-first launches.",
+      "tags": []
+    },
+    {
+      "id": "TP-AI-003",
+      "name": "Question to Camera",
+      "domain": "AD",
+      "kind": "INTRO",
+      "direction": "A presenter looks into the lens and asks the question every viewer is thinking.",
+      "camera": "Medium close-up",
+      "light": "Bright, natural",
+      "seconds": 3,
+      "moods": [
+        "PLAYFUL",
+        "CONFIDENT"
+      ],
+      "whenToUse": "Educational and service ads.",
+      "tags": []
+    },
+    {
+      "id": "TP-AI-004",
+      "name": "Before-and-After Split",
+      "domain": "AD",
+      "kind": "INTRO",
+      "direction": "A split screen: life before on one side, after on the other.",
+      "camera": "Locked off, matched framing",
+      "light": "Matched",
+      "seconds": 3,
+      "moods": [
+        "TRIUMPHANT",
+        "HAPPY"
+      ],
+      "whenToUse": "Transformation products.",
+      "tags": []
+    },
+    {
+      "id": "TP-AI-005",
+      "name": "Unexpected Moment",
+      "domain": "AD",
+      "kind": "INTRO",
+      "direction": "Something surprising happens in an ordinary scene (a spill, a laugh, a surprise visitor) and the product saves the day.",
+      "camera": "Handheld",
+      "light": "Natural",
+      "seconds": 3,
+      "moods": [
+        "PLAYFUL",
+        "HAPPY"
+      ],
+      "whenToUse": "Humorous and lifestyle brands.",
+      "tags": []
+    },
+    {
+      "id": "TP-AI-006",
+      "name": "Sound-On Hook",
+      "domain": "AD",
+      "kind": "INTRO",
+      "direction": "A strong sound (a can opening, a sizzle, a beat drop) with a close-up of its source.",
+      "camera": "Macro",
+      "light": "Contrasty",
+      "seconds": 2,
+      "moods": [
+        "CONFIDENT"
+      ],
+      "whenToUse": "Food, drink and tech.",
+      "tags": []
+    },
+    {
+      "id": "TP-AS-001",
+      "name": "Demo on the Counter",
+      "domain": "AD",
+      "kind": "SCENE",
+      "direction": "Hands demonstrate the product on a kitchen counter, step by step, close and clear.",
+      "camera": "Overhead and 45°",
+      "light": "Soft daylight",
+      "seconds": 6,
+      "moods": [
+        "CONFIDENT"
+      ],
+      "whenToUse": "How-it-works scenes.",
+      "tags": []
+    },
+    {
+      "id": "TP-AS-002",
+      "name": "Day-in-the-Life Montage",
+      "domain": "AD",
+      "kind": "SCENE",
+      "direction": "Three quick moments across a day with the product naturally present in each.",
+      "camera": "Handheld, quick cuts",
+      "light": "Natural, shifting through the day",
+      "seconds": 8,
+      "moods": [
+        "HAPPY"
+      ],
+      "whenToUse": "Lifestyle positioning.",
+      "tags": []
+    },
+    {
+      "id": "TP-AS-003",
+      "name": "Street Interview",
+      "domain": "AD",
+      "kind": "SCENE",
+      "direction": "A presenter asks people in the street to try the product; real, varied reactions.",
+      "camera": "Handheld two-shot",
+      "light": "Daylight",
+      "seconds": 8,
+      "moods": [
+        "HAPPY",
+        "PLAYFUL"
+      ],
+      "whenToUse": "Social proof.",
+      "tags": []
+    },
+    {
+      "id": "TP-AS-004",
+      "name": "Expert at Work",
+      "domain": "AD",
+      "kind": "SCENE",
+      "direction": "A professional (chef, nurse, engineer) uses the product while working and explains why.",
+      "camera": "Medium, documentary",
+      "light": "Practical workplace light",
+      "seconds": 8,
+      "moods": [
+        "CONFIDENT"
+      ],
+      "whenToUse": "Credibility and B2B.",
+      "tags": []
+    },
+    {
+      "id": "TP-AS-005",
+      "name": "Family Table",
+      "domain": "AD",
+      "kind": "SCENE",
+      "direction": "A family shares a meal; the product is passed around; conversation and laughter.",
+      "camera": "Wide then close-ups",
+      "light": "Warm evening light",
+      "seconds": 8,
+      "moods": [
+        "HAPPY",
+        "ROMANTIC"
+      ],
+      "whenToUse": "Food and household.",
+      "tags": []
+    },
+    {
+      "id": "TP-AS-006",
+      "name": "Hero Packshot",
+      "domain": "AD",
+      "kind": "SCENE",
+      "direction": "The product on a plinth turning slowly, light raking across the label.",
+      "camera": "Slow orbit, macro",
+      "light": "Studio, rim light",
+      "seconds": 4,
+      "moods": [
+        "CONFIDENT"
+      ],
+      "whenToUse": "Premium products.",
+      "tags": []
+    },
+    {
+      "id": "TP-AS-007",
+      "name": "Customer Story",
+      "domain": "AD",
+      "kind": "SCENE",
+      "direction": "A customer at home or at work tells what changed, cut with shots of them living it.",
+      "camera": "Interview + b-roll",
+      "light": "Natural",
+      "seconds": 10,
+      "moods": [
+        "CALM",
+        "NOSTALGIC"
+      ],
+      "whenToUse": "Testimonials.",
+      "tags": []
+    },
+    {
+      "id": "TP-AO-001",
+      "name": "Packshot and Logo",
+      "domain": "AD",
+      "kind": "OUTRO",
+      "direction": "The product centred on a clean background, the logo and offer appearing beside it.",
+      "camera": "Locked off",
+      "light": "Clean studio",
+      "seconds": 3,
+      "moods": [
+        "CONFIDENT"
+      ],
+      "whenToUse": "Every ad's safe ending.",
+      "tags": []
+    },
+    {
+      "id": "TP-AO-002",
+      "name": "Smile and Call to Action",
+      "domain": "AD",
+      "kind": "OUTRO",
+      "direction": "The presenter smiles, says the call to action, and points to where the link appears.",
+      "camera": "Medium close-up",
+      "light": "Bright",
+      "seconds": 3,
+      "moods": [
+        "HAPPY",
+        "CONFIDENT"
+      ],
+      "whenToUse": "Direct-response ads.",
+      "tags": []
+    },
+    {
+      "id": "TP-AO-003",
+      "name": "Shopfront Reveal",
+      "domain": "AD",
+      "kind": "OUTRO",
+      "direction": "The camera pulls back to reveal the shop or venue with people walking in.",
+      "camera": "Pull-back wide",
+      "light": "Golden hour",
+      "seconds": 4,
+      "moods": [
+        "HAPPY"
+      ],
+      "whenToUse": "Local businesses and events.",
+      "tags": []
+    },
+    {
+      "id": "TP-AO-004",
+      "name": "Community Close",
+      "domain": "AD",
+      "kind": "OUTRO",
+      "direction": "Everyone from the ad turns to the camera together, smiling, as the logo appears.",
+      "camera": "Wide",
+      "light": "Warm",
+      "seconds": 3,
+      "moods": [
+        "HAPPY",
+        "TRIUMPHANT"
+      ],
+      "whenToUse": "Community and membership brands.",
+      "tags": []
+    },
+    {
+      "id": "TP-AO-005",
+      "name": "Tagline on Black",
+      "domain": "AD",
+      "kind": "OUTRO",
+      "direction": "Cut to black with the tagline, then the logo, a single sound accent.",
+      "camera": "Graphic",
+      "light": "Black",
+      "seconds": 3,
+      "moods": [
+        "CONFIDENT",
+        "MYSTERIOUS"
+      ],
+      "whenToUse": "Premium and emotional ads.",
+      "tags": []
+    }
+  ]
+}

@@ -51,6 +51,8 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node package.json prisma.config.ts ./
 COPY --chown=node:node src/models/schema.prisma ./src/models/schema.prisma
 COPY --chown=node:node src/models/migrations ./src/models/migrations
+# The move library and scene templates (read at runtime by src/moves/library.ts).
+COPY --chown=node:node data ./data
 USER node
 EXPOSE 4000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \

@@ -1,5 +1,6 @@
 /** Row shapes for the studio tables (camelCased by sql.ts). */
 import type { Aspect, Look, PerformanceEmotion, Shot, Transition } from './cinema.js';
+import type { SceneMove } from '../moves/types.js';
 
 export type StudioKind = 'AI_VIDEO' | 'MUSIC_VIDEO' | 'COMMERCIAL';
 export type StudioStatus = 'DRAFT' | 'ASSEMBLING' | 'READY' | 'FAILED';
@@ -186,6 +187,8 @@ export interface SceneRow {
   intensity?: number | null;
   /** Commercials (migration 025): the scene's spoken line (VOICE asset), mixed in at the master. */
   voiceAssetId?: string | null;
+  /** Performance moves on the scene's characters (migration 028), woven into the prompt. */
+  moves?: SceneMove[];
   approvedAt: Date | null;
   shotApprovedAt: Date | null;
   createdAt: Date;

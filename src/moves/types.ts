@@ -129,6 +129,8 @@ export interface SceneTemplate {
 
 /** A move placed on a character in a scene (studio_scenes.moves, a frozen copy). */
 export interface SceneMove {
+  /** This placement (remove by it). */
+  id: string;
   ref: string;
   name: string;
   cue: string;
@@ -136,5 +138,7 @@ export interface SceneMove {
   characterId: string | null;
   characterName: string;
   source: 'LIBRARY' | 'CUSTOM';
+  /** Copied custom moves: the original creator (credited wherever the move is used). */
+  creditTo?: string | null;
   addedAt: string;
 }
