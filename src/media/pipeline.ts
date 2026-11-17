@@ -44,6 +44,7 @@ import type { ReelPlan } from './edit.js';
 import { DEFAULT_STYLE, renderReel, type EditStyle, type Framing } from './render.js';
 import { editsForReel, type ReelScript } from './script.js';
 import { extractAudio, transcribe, type Word } from './transcribe.js';
+import { getWatermarkSettings } from '../billing/watermarkRemoval.js';
 
 export interface ProjectOptions {
   framing: Framing;
@@ -411,6 +412,8 @@ export async function runProject(projectId: string): Promise<void> {
       try {
         const edits = editsForReel(options.plan, reel.startSec, reel.endSec);
         const titleSeconds = options.plan?.titleSeconds;
+        // Every reel carries the platform watermark unless the super admin switched it off.
+        const watermarked = (await getWatermarkSettings()).enabled;
         const output = await timed(
           `ffmpeg edit (${options.framing ?? 'original'}, look ${style.look}${style.jumpCuts ? ', jump cuts' : ''}${style.autoEffects ? ', auto effects' : ''}${style.denoise ? ', denoise' : ''}${style.muted ? ', muted' : ''}${edits.length ? `, ${edits.length} script edit(s)` : ''})`,
           () =>
@@ -429,6 +432,7 @@ export async function runProject(projectId: string): Promise<void> {
               plan: options.reelPlans?.[reel.index],
               edits,
               title: titleSeconds ? { text: reel.title, seconds: titleSeconds } : undefined,
+              watermark: watermarked,
               signal: controller.signal,
               onProgress: (fraction) => {
                 // ffmpeg reports several times a second; one write every 3 s is plenty

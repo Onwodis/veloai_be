@@ -32,16 +32,16 @@ import { AppError } from '../utils/AppError.js';
 import { logger } from '../utils/logger.js';
 import { titleCase } from '../utils/names.js';
 import { publishProgress } from '../realtime/events.js';
-import { arrange, isIdentityArrangement, mixDuration, renderMix, transcribeSong, transcriptionPrompt, videoFrames, type AudioEdits, type AudioTrack, type Clip, type Lyrics, type Region } from './audio.js';
+import { arrange, fxFilters, isIdentityArrangement, mixDuration, renderMix, transcribeSong, transcriptionPrompt, videoFrames, type AudioEdits, type AudioTrack, type Clip, type Lyrics, type Region, type TrackFx } from './audio.js';
 import type { CharacterAttributes, CharacterRow, Costume } from './cast.js';
 import { meContext } from '../likeness/service.js';
-import { castCharacter, correctLyrics, detectPeople, discuss, expandScene, polishLyrics, proofreadLyrics, storyboard, type DirectorContext } from './director.js';
+import { castCharacter, correctLyrics, detectPeople, discuss, expandScene, polishLyrics, profileVoice, proofreadLyrics, storyboard, type DirectorContext } from './director.js';
 import { polishProject, type PolishReport } from './polish.js';
 import { dismissReview, reviewTake } from './review.js';
 import type { ProjectCategory } from '../config/categories.js';
 import { aiMaster } from './mastering.js';
 import { ANALYSIS_VERSION, analyseAudio, type AudioAnalysis } from './analysis.js';
-import { directionSchema, lockToSong, parseDirection, songContext, songMapText, type Direction } from './songmap.js';
+import { directionSchema, lockToSong, parseDirection, placeText, songContext, songMapText, type Direction } from './songmap.js';
 import { parseTitles, titlesSchema, type Titles } from './titles.js';
 
 export const STAGES = ['SONG', 'SOUND', 'CHARACTERS', 'SCENES', 'DISCUSSION', 'STORYBOARD', 'SHOOT', 'MASTER'] as const;
@@ -122,7 +122,7 @@ export async function load(workspaceId: string, projectId: string): Promise<{ pr
 }
 
 /** Edits are allowed only on the stage being worked on (or the listed extra stages). */
-function assertStage(mv: MvRow, ...allowed: Stage[]): void {
+export function assertStage(mv: MvRow, ...allowed: Stage[]): void {
   if (!allowed.includes(mv.stage)) {
     throw AppError.conflict(
       `This is part of “${STAGE_LABEL[allowed[0]!]}”. ${STAGES.indexOf(mv.stage) > STAGES.indexOf(allowed[0]!) ? 'Reopen that stage to change it.' : 'Approve the earlier stages first.'}`,
@@ -130,13 +130,13 @@ function assertStage(mv: MvRow, ...allowed: Stage[]): void {
   }
 }
 
-async function touch(projectId: string): Promise<void> {
+export async function touch(projectId: string): Promise<void> {
   await sql`UPDATE mv_projects SET updated_at = now() WHERE project_id = ${projectId}`;
   await sql`UPDATE studio_projects SET updated_at = now() WHERE id = ${projectId}`;
 }
 
 /** Runs a token-gated AI step: reserve → work → settle (or release on failure). */
-async function charged<T>(auth: AuthContext, workspaceId: string, projectId: string, kind: string, tokens: number, note: string, work: () => Promise<T>): Promise<T> {
+export async function charged<T>(auth: AuthContext, workspaceId: string, projectId: string, kind: string, tokens: number, note: string, work: () => Promise<T>): Promise<T> {
   const { reservation } = await reserveTokens(auth, workspaceId, kind, tokens, { projectId });
   try {
     const result = await work();
@@ -180,15 +180,33 @@ async function characterView(character: CharacterRow, assets: Map<string, AssetR
   };
 }
 
+/**
+ * Every mv_projects column the view reads. audio_analysis (the song's beat / energy map,
+ * often hundreds of KB) is left out: the view never uses it, and it was sent on every
+ * load and every poll.
+ */
+const MV_VIEW_COLUMNS = [
+  'project_id', 'workspace_id', 'genre', 'vision', 'mood', 'lead_act', 'stage', 'approvals', 'original_song_id', 'audio_edits', 'mix_rendered_at',
+  'loudness_lufs', 'lyrics', 'auto_mode', 'auto_by', 'created_at', 'updated_at', 'artist_name', 'lyrics_job', 'polish', 'sequence', 'creative_mode',
+  'subtitles', 'foley', 'auto_approve', 'titles', 'direction',
+];
+
 export async function view(auth: AuthContext, workspaceId: string, projectId: string) {
-  await access(auth, workspaceId, false);
-  const { mv } = await load(workspaceId, projectId);
-  const [base, characters, messages, assets, settings] = await Promise.all([
-    studio.getProject(auth, workspaceId, projectId),
+  // Two round trips in all: everything that needs only the ids, then everything that needs the project.
+  const [, [project], [mvRow], assets] = await Promise.all([
+    access(auth, workspaceId, false),
+    sql<ProjectRow[]>`SELECT * FROM studio_projects WHERE id = ${projectId} AND workspace_id = ${workspaceId} AND kind = 'MUSIC_VIDEO' AND deleted_at IS NULL`,
+    sql<MvRow[]>`SELECT ${sql(MV_VIEW_COLUMNS)} FROM mv_projects WHERE project_id = ${projectId}`,
+    sql<AssetRow[]>`SELECT * FROM studio_assets WHERE project_id = ${projectId}`,
+  ]);
+  if (!project) throw AppError.notFound('Music video');
+  // Music videos made in the old studio flow join the director here (rare: one-off).
+  const mv = mvRow ?? (await load(workspaceId, projectId)).mv;
+  const [base, characters, messages, settings] = await Promise.all([
+    studio.projectView(project, { assets }),
     sql<CharacterRow[]>`SELECT * FROM mv_characters WHERE project_id = ${projectId} ORDER BY position, created_at`,
     // The latest 200 messages of the director's room (oldest first); the rest stay in the database.
     sql<MessageRow[]>`SELECT * FROM (SELECT * FROM mv_messages WHERE project_id = ${projectId} ORDER BY created_at DESC LIMIT 200) recent ORDER BY created_at`,
-    sql<AssetRow[]>`SELECT * FROM studio_assets WHERE project_id = ${projectId}`,
     getStudioSettings(),
   ]);
   const assetMap = new Map(assets.map((asset) => [asset.id, asset]));
@@ -247,6 +265,8 @@ export async function view(auth: AuthContext, workspaceId: string, projectId: st
         mix: settings.costs.mvMix,
         foleyPerSecond: settings.models.foley.enabled ? settings.costs.foleyPerSecond : 0,
         characterStill: settings.costs.characterStill,
+        /** A look created from the description: portrait + full body + the casting sheet. */
+        characterLook: settings.costs.image + settings.costs.imageEdit + settings.costs.mvCasting,
         videoEditPerSecond: settings.costs.videoEditPerSecond,
         // About one 6 s lip-synced shot: what the low-balance banner compares against.
         typicalShot: settings.costs.keyframe + 6 * (settings.costs.videoPerSecond + settings.costs.lipSyncPerSecond),
@@ -392,6 +412,8 @@ export async function transcribeLyrics(auth: AuthContext, workspaceId: string, p
       if (!reservation.unmetered) await sql`UPDATE studio_projects SET tokens_charged = tokens_charged + ${tokens} WHERE id = ${projectId}`;
       await sql`UPDATE mv_projects SET lyrics = ${json(stored)} WHERE project_id = ${projectId}`;
       await save(job({ status: 'DONE', progress: 1, lines: stored.lines }, state));
+      // The voice as a background cue (accent + region, from the words). Best effort, free.
+      void refreshVoice(projectId, stored, { title: project.title, artist: mv.artistName, genre: mv.genre });
     } catch (error) {
       await releaseSystem(reservation.id, workspaceId).catch(() => undefined);
       const message = (error instanceof Error ? error.message : String(error)).slice(0, 400);
@@ -428,7 +450,7 @@ export async function smartCorrectLyrics(auth: AuthContext, workspaceId: string,
     lines[change.index]!.text = change.text.trim();
     fixed += 1;
   }
-  const lyrics: Lyrics = { text: lines.map((line) => line.text).join('\n'), lines, language: mv.lyrics.language, languages: mv.lyrics.languages ?? null, engine: `${mv.lyrics.engine} + artist + AI corrections` };
+  const lyrics: Lyrics = { text: lines.map((line) => line.text).join('\n'), lines, language: mv.lyrics.language, languages: mv.lyrics.languages ?? null, voice: mv.lyrics.voice ?? null, engine: `${mv.lyrics.engine} + artist + AI corrections` };
   await sql`UPDATE mv_projects SET lyrics = ${json(lyrics)}, updated_at = now() WHERE project_id = ${projectId}`;
   return { project: await view(auth, workspaceId, projectId), fixed };
 }
@@ -464,6 +486,7 @@ export async function smartSaveLyrics(auth: AuthContext, workspaceId: string, pr
     lines,
     language: mv.lyrics?.language ?? null,
     languages: mv.lyrics?.languages ?? null,
+    voice: mv.lyrics?.voice ?? null,
     engine: mv.lyrics ? `${mv.lyrics.engine.replace(/ \+ artist.*$/, '')} + artist${fixed ? ' + AI corrections' : ''}` : 'artist',
   };
   await sql`UPDATE mv_projects SET lyrics = ${json(lyrics)}, updated_at = now() WHERE project_id = ${projectId}`;
@@ -515,7 +538,7 @@ export async function proofread(auth: AuthContext, workspaceId: string, projectI
 export async function updateLyrics(auth: AuthContext, workspaceId: string, projectId: string, lines: { start: number; end: number; text: string }[]) {
   await access(auth, workspaceId, true);
   const { mv } = await load(workspaceId, projectId);
-  const lyrics: Lyrics = { text: lines.map((line) => line.text).join('\n'), lines, language: mv.lyrics?.language ?? null, languages: mv.lyrics?.languages ?? null, engine: mv.lyrics ? `${mv.lyrics.engine} + artist edits` : 'artist' };
+  const lyrics: Lyrics = { text: lines.map((line) => line.text).join('\n'), lines, language: mv.lyrics?.language ?? null, languages: mv.lyrics?.languages ?? null, voice: mv.lyrics?.voice ?? null, engine: mv.lyrics ? `${mv.lyrics.engine} + artist edits` : 'artist' };
   await sql`UPDATE mv_projects SET lyrics = ${json(lyrics)}, updated_at = now() WHERE project_id = ${projectId}`;
   return view(auth, workspaceId, projectId);
 }
@@ -538,13 +561,13 @@ export async function saveAudio(auth: AuthContext, workspaceId: string, projectI
 }
 
 /** Renders the DAW edits into the working mix (the song every later stage uses). */
-async function buildMix(auth: AuthContext, workspaceId: string, project: ProjectRow, mv: MvRow): Promise<void> {
+export async function buildMix(auth: AuthContext, workspaceId: string, project: ProjectRow, mv: MvRow): Promise<void> {
   const originalId = mv.originalSongId ?? project.musicAssetId;
   const [song] = originalId ? await sql<AssetRow[]>`SELECT * FROM studio_assets WHERE id = ${originalId}` : [];
   if (!song) throw AppError.badRequest('Upload the song first.');
   const edits = mv.audioEdits;
   // An arrangement that is just the untouched song needs no render.
-  const plain = edits.clips?.length ? isIdentityArrangement(song.meta.durationSec ?? 0, edits.clips) && !edits.gainDb : edits.regions.length === 0;
+  const plain = (edits.clips?.length ? isIdentityArrangement(song.meta.durationSec ?? 0, edits.clips) && !edits.gainDb : edits.regions.length === 0) && fxFilters(edits.musicFx).length === 0;
   if (plain && edits.layers.length === 0) {
     // No edits: the original song is the mix.
     await sql`UPDATE studio_projects SET music_asset_id = ${song.id} WHERE id = ${project.id}`;
@@ -870,6 +893,9 @@ export async function approveCharacter(auth: AuthContext, workspaceId: string, p
 
 export interface MvSceneInput {
   kind?: 'INTRO' | 'STORY' | 'OUTRO' | undefined;
+  /** The artist's names for the scene (labels only). */
+  title?: string | undefined;
+  subtitle?: string | undefined;
   description?: string | undefined;
   prompt?: string | undefined;
   shot?: SceneRow['shot'] | undefined;
@@ -893,7 +919,7 @@ export interface MvSceneInput {
 const intensityLevel = (value: number | null | undefined): number | null => (value === null || value === undefined || !Number.isFinite(value) ? null : Math.min(3, Math.max(1, Math.round(value))));
 
 /** Scenes can be written, edited, planned, added and deleted in these stages (the shoot is a timeline editor). */
-const SCENE_STAGES: Stage[] = ['SCENES', 'STORYBOARD', 'SHOOT'];
+export const SCENE_STAGES: Stage[] = ['SCENES', 'STORYBOARD', 'SHOOT'];
 /** Approving / unapproving a scene never locks anything: allowed through the shoot. */
 const APPROVAL_STAGES: Stage[] = ['SCENES', 'DISCUSSION', 'STORYBOARD', 'SHOOT'];
 
@@ -909,17 +935,18 @@ async function loadScenes(projectId: string): Promise<SceneRow[]> {
   return sql<SceneRow[]>`SELECT * FROM studio_scenes WHERE project_id = ${projectId} ORDER BY position`;
 }
 
-/** Keeps the INTRO first and the OUTRO last, with positions 0..n-1. */
-async function normalizeOrder(projectId: string, order?: string[]): Promise<void> {
+/** Positions 0..n-1 in the given order. Intro / outro are only labels: any scene can sit anywhere. */
+export async function normalizeOrder(projectId: string, order?: string[]): Promise<void> {
   const scenes = await loadScenes(projectId);
   const byId = new Map(scenes.map((scene) => [scene.id, scene]));
   const ordered = order ? [...order.filter((id) => byId.has(id)).map((id) => byId.get(id)!), ...scenes.filter((scene) => !order.includes(scene.id))] : scenes;
-  const sorted = [...ordered.filter((scene) => scene.kind === 'INTRO'), ...ordered.filter((scene) => scene.kind === 'STORY'), ...ordered.filter((scene) => scene.kind === 'OUTRO')];
-  for (const [position, scene] of sorted.entries()) if (scene.position !== position) await sql`UPDATE studio_scenes SET position = ${position} WHERE id = ${scene.id}`;
+  for (const [position, scene] of ordered.entries()) if (scene.position !== position) await sql`UPDATE studio_scenes SET position = ${position} WHERE id = ${scene.id}`;
 }
 
+/** A brand-new scene list starts with an intro and an outro (suggestions: both can be renamed, moved or deleted). */
 async function ensureBookends(projectId: string): Promise<void> {
   const scenes = await loadScenes(projectId);
+  if (scenes.length > 0) return;
   if (!scenes.some((scene) => scene.kind === 'INTRO')) {
     await sql`INSERT INTO studio_scenes (project_id, position, kind, description, shot, transition, duration_sec, features_subject)
       VALUES (${projectId}, -1, 'INTRO', 'Opening shot: set the world of the song before the first line', 'aerial-reveal', 'dissolve', 6, false)`;
@@ -931,7 +958,7 @@ async function ensureBookends(projectId: string): Promise<void> {
   await normalizeOrder(projectId);
 }
 
-export async function addScene(auth: AuthContext, workspaceId: string, projectId: string, input: MvSceneInput & { description: string }) {
+export async function addScene(auth: AuthContext, workspaceId: string, projectId: string, input: MvSceneInput & { description: string; afterSceneId?: string | undefined }) {
   await access(auth, workspaceId, true);
   const { mv } = await load(workspaceId, projectId);
   assertStage(mv, ...SCENE_STAGES);
@@ -939,12 +966,21 @@ export async function addScene(auth: AuthContext, workspaceId: string, projectId
   const scenes = await loadScenes(projectId);
   if (scenes.length >= limits.maxScenes) throw AppError.badRequest(`Up to ${limits.maxScenes} scenes.`);
   const cast = input.characterIds ?? [];
-  await sql`
-    INSERT INTO studio_scenes (project_id, position, kind, description, prompt, shot, transition, duration_sec, features_subject, lip_sync, character_ids, costume, location, time_of_day, lyric, emotion, intensity)
-    VALUES (${projectId}, ${scenes.length}, 'STORY', ${input.description}, ${input.prompt ?? null}, ${input.shot ?? 'medium'}, ${input.transition ?? 'crossfade'}, ${input.durationSec ?? 5},
+  const [added] = await sql<{ id: string }[]>`
+    INSERT INTO studio_scenes (project_id, position, kind, title, subtitle, description, prompt, shot, transition, duration_sec, features_subject, lip_sync, character_ids, costume, location, time_of_day, lyric, emotion, intensity)
+    VALUES (${projectId}, ${scenes.length}, 'STORY', ${(input.title ?? '').slice(0, 80)}, ${(input.subtitle ?? '').slice(0, 120)}, ${input.description}, ${input.prompt ?? null}, ${input.shot ?? 'medium'}, ${input.transition ?? 'crossfade'}, ${input.durationSec ?? 5},
       ${cast.length > 0}, ${Boolean(input.lipSync) && cast.length > 0}, ${cast}::uuid[], ${input.costume ?? null}, ${input.location ?? null}, ${input.timeOfDay ?? null}, ${input.lyric ?? null},
-      ${input.emotion ?? null}, ${intensityLevel(input.intensity)})`;
-  await normalizeOrder(projectId);
+      ${input.emotion ?? null}, ${intensityLevel(input.intensity)}) RETURNING id`;
+  // Beside the scene in focus (the ones after it move up one number), else before the outro.
+  const after = input.afterSceneId ? scenes.find((scene) => scene.id === input.afterSceneId) : undefined;
+  if (after && added) {
+    const order = scenes.map((scene) => scene.id);
+    const at = order.indexOf(after.id) + 1;
+    order.splice(at, 0, added.id);
+    await normalizeOrder(projectId, order);
+  } else {
+    await normalizeOrder(projectId);
+  }
   await autoApprove(projectId);
   await touch(projectId);
   return view(auth, workspaceId, projectId);
@@ -957,7 +993,7 @@ async function writeScene(projectId: string, sceneId: string, input: MvSceneInpu
   const lipSync = (input.mode ? input.mode === 'PERFORMANCE' : (input.lipSync ?? scene.lipSync)) && cast.length > 0;
   const mode = lipSync ? 'PERFORMANCE' : input.mode && input.mode !== 'PERFORMANCE' ? input.mode : scene.mode === 'PERFORMANCE' || !scene.mode ? (cast.length ? 'NARRATIVE' : 'BROLL') : scene.mode;
   await sql`
-    UPDATE studio_scenes SET mode = ${mode}, description = ${input.description ?? scene.description}, prompt = ${input.prompt ?? scene.prompt}, shot = ${input.shot ?? scene.shot},
+    UPDATE studio_scenes SET mode = ${mode}, title = ${input.title ?? scene.title ?? ''}, subtitle = ${input.subtitle ?? scene.subtitle ?? ''}, description = ${input.description ?? scene.description}, prompt = ${input.prompt ?? scene.prompt}, shot = ${input.shot ?? scene.shot},
       transition = ${input.transition ?? scene.transition}, duration_sec = ${input.durationSec ?? scene.durationSec}, character_ids = ${cast}::uuid[],
       features_subject = ${cast.length > 0}, lip_sync = ${lipSync}, costume = ${input.costume ?? scene.costume}, location = ${input.location ?? scene.location},
       time_of_day = ${input.timeOfDay ?? scene.timeOfDay}, lyric = ${input.lyric ?? scene.lyric},
@@ -984,7 +1020,8 @@ export async function deleteScene(auth: AuthContext, workspaceId: string, projec
   assertStage(mv, ...SCENE_STAGES);
   const [scene] = await sql<SceneRow[]>`SELECT * FROM studio_scenes WHERE id = ${sceneId} AND project_id = ${projectId}`;
   if (!scene) throw AppError.notFound('Scene');
-  if (scene.kind !== 'STORY') throw AppError.badRequest('Every music video opens with an intro and closes with an outro: edit them instead.');
+  const [{ count } = { count: 0 }] = await sql<{ count: number }[]>`SELECT count(*)::int AS count FROM studio_scenes WHERE project_id = ${projectId}`;
+  if (count <= 1) throw AppError.badRequest('Keep at least one scene: add another before deleting this one.');
   // Running takes are stopped (their workers clear their own files); finished ones' files go now.
   await studio.cancelScenes(projectId, [sceneId]);
   const takeIds = await studio.finishedTakeIds(projectId, [sceneId]);
@@ -1002,7 +1039,22 @@ export async function reorderScenes(auth: AuthContext, workspaceId: string, proj
   return view(auth, workspaceId, projectId);
 }
 
-async function directorContext(project: ProjectRow, mv: MvRow, withSongMap = true): Promise<DirectorContext> {
+/**
+ * Reads the song's voice (accent, the region it speaks to) from its words and
+ * stores it on the lyrics. A cue only: the artist's cast background and shoot
+ * location (Direction) always win.
+ */
+async function refreshVoice(projectId: string, lyrics: Lyrics, context: { title: string; artist: string; genre: string }): Promise<void> {
+  if (!lyrics.lines.some((line) => line.text.trim())) return;
+  try {
+    const { engine: _engine, ...voice } = await profileVoice(lyrics.lines, { ...context, language: lyrics.language });
+    await sql`UPDATE mv_projects SET lyrics = jsonb_set(lyrics, '{voice}', ${json(voice)}) WHERE project_id = ${projectId} AND lyrics IS NOT NULL`;
+  } catch (error) {
+    logger.warn({ err: error, projectId }, 'voice profile failed');
+  }
+}
+
+export async function directorContext(project: ProjectRow, mv: MvRow, withSongMap = true): Promise<DirectorContext> {
   const [characters, scenes, music, song] = await Promise.all([
     sql<CharacterRow[]>`SELECT * FROM mv_characters WHERE project_id = ${project.id} ORDER BY position`,
     loadScenes(project.id),
@@ -1010,7 +1062,9 @@ async function directorContext(project: ProjectRow, mv: MvRow, withSongMap = tru
     withSongMap ? songContext(project.id).catch(() => null) : Promise.resolve(null),
   ]);
   const direction = parseDirection(mv.direction);
+  const place = placeText(direction, mv.lyrics?.voice);
   return {
+    ...(place ? { place } : {}),
     songMap: song && (song.lines.length || song.analysis) ? songMapText(song, direction) : undefined,
     titles: mv.titles ? parseTitles(mv.titles, mv.artistName, project.title) : null,
     title: project.title,
@@ -1056,6 +1110,8 @@ export async function expand(auth: AuthContext, workspaceId: string, projectId: 
     projectId,
     sceneId,
     {
+      ...(scene.title?.trim() ? {} : { title: plan.title.slice(0, 80) }),
+      ...(scene.subtitle?.trim() ? {} : { subtitle: plan.subtitle.slice(0, 120) }),
       description: plan.description.slice(0, 1000),
       prompt: plan.prompt.slice(0, 2000),
       shot: plan.shot,
@@ -1074,7 +1130,8 @@ export async function expand(auth: AuthContext, workspaceId: string, projectId: 
     false,
   );
   await autoApprove(projectId);
-  return view(auth, workspaceId, projectId);
+  // The director says what it did and why (shown on the scene card).
+  return { project: await view(auth, workspaceId, projectId), why: plan.why.slice(0, 1200) };
 }
 
 export async function approveScene(auth: AuthContext, workspaceId: string, projectId: string, sceneId: string) {
@@ -1295,8 +1352,8 @@ export async function buildStoryboard(auth: AuthContext, workspaceId: string, pr
     await tx`DELETE FROM studio_scenes WHERE project_id = ${projectId}`;
     for (const [position, scene] of board.scenes.slice(0, settings.limits.maxScenes).entries()) {
       await tx`
-        INSERT INTO studio_scenes (project_id, position, kind, description, prompt, shot, transition, duration_sec, features_subject, lip_sync, character_ids, costume, location, time_of_day, lyric, mode, emotion, intensity)
-        VALUES (${projectId}, ${position}, ${scene.kind}, ${scene.description.slice(0, 1000)}, ${scene.prompt.slice(0, 2000)}, ${scene.shot}, ${scene.transition}, ${scene.durationSec},
+        INSERT INTO studio_scenes (project_id, position, kind, title, subtitle, description, prompt, shot, transition, duration_sec, features_subject, lip_sync, character_ids, costume, location, time_of_day, lyric, mode, emotion, intensity)
+        VALUES (${projectId}, ${position}, ${scene.kind}, ${scene.title.slice(0, 80)}, ${scene.subtitle.slice(0, 120)}, ${scene.description.slice(0, 1000)}, ${scene.prompt.slice(0, 2000)}, ${scene.shot}, ${scene.transition}, ${scene.durationSec},
           ${scene.characterIds.length > 0}, ${scene.lipSync && scene.characterIds.length > 0}, ${scene.characterIds}::uuid[], ${scene.costume.slice(0, 500)},
           ${scene.location.slice(0, 200)}, ${scene.timeOfDay.slice(0, 24)}, ${scene.lyric.slice(0, 300)},
           ${scene.lipSync && scene.characterIds.length > 0 ? 'PERFORMANCE' : scene.mode === 'PERFORMANCE' ? 'NARRATIVE' : (scene.mode ?? null)},
@@ -1393,7 +1450,6 @@ async function checkStage(project: ProjectRow, mv: MvRow, stage: Stage): Promise
       return count > 0 ? null : 'Talk the scenes through with the director at least once.';
     }
     case 'STORYBOARD': {
-      if (scenes[0]?.kind !== 'INTRO' || scenes.at(-1)?.kind !== 'OUTRO') return 'The storyboard must open with the intro and close with the outro.';
       // Only approved scenes WITH a finished video go on to the master; the rest are left out
       // (generate or approve them later by reopening the storyboard).
       const approved = scenes.filter((scene) => scene.approvedAt);
@@ -1932,6 +1988,48 @@ export async function songSource(auth: AuthContext, workspaceId: string, project
   const object = await getObjectStream(song.key);
   if (!object) throw AppError.notFound('Song');
   return { ...object, contentType: object.contentType ?? song.contentType ?? 'audio/mpeg' };
+}
+
+/**
+ * The storyboard mixer (Cubase MixConsole style): the imported audio tracks
+ * (added / removed / renamed, level, mute), every channel strip's effects
+ * (song, overlay lane, each track) and the overlay events with the track each
+ * sits on. A removed track's events move back to the overlay lane (never
+ * silently lost). One save = one mix render (the price is shown first).
+ */
+export async function saveMixer(
+  auth: AuthContext,
+  workspaceId: string,
+  projectId: string,
+  input: { tracks: AudioTrack[]; layers: AudioEdits['layers']; musicFx?: TrackFx | undefined; overlayFx?: TrackFx | undefined },
+) {
+  await access(auth, workspaceId, true);
+  const { project, mv } = await load(workspaceId, projectId);
+  assertStage(mv, 'SOUND', 'STORYBOARD', 'SHOOT');
+  if (new Set(input.tracks.map((track) => track.id)).size !== input.tracks.length) throw AppError.badRequest('Two tracks share an id.');
+  if (input.layers.length) {
+    const own = new Set((await sql<{ id: string }[]>`SELECT id FROM studio_assets WHERE project_id = ${project.id} AND role = 'SFX' AND status = 'READY'`).map((row) => row.id));
+    if (input.layers.some((layer) => !own.has(layer.assetId))) throw AppError.badRequest('An audio event uses a file that is not in this project.');
+  }
+  const trackIds = new Set(input.tracks.map((track) => track.id));
+  const layers = input.layers.map((layer) => {
+    if (!layer.track || trackIds.has(layer.track)) return layer;
+    const moved = { ...layer };
+    delete moved.track;
+    return moved;
+  });
+  const edits: AudioEdits = {
+    ...mv.audioEdits,
+    tracks: input.tracks,
+    layers,
+    ...(input.musicFx ? { musicFx: input.musicFx } : {}),
+    ...(input.overlayFx ? { overlayFx: input.overlayFx } : {}),
+  };
+  if (!input.musicFx) delete edits.musicFx;
+  if (!input.overlayFx) delete edits.overlayFx;
+  await sql`UPDATE mv_projects SET audio_edits = ${json(edits)}, mix_rendered_at = NULL WHERE project_id = ${projectId}`;
+  await buildMix(auth, workspaceId, project, (await load(workspaceId, projectId)).mv);
+  return view(auth, workspaceId, projectId);
 }
 
 /** Overlay tracks (effect layers under the song) edited on the storyboard timeline. */

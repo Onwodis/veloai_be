@@ -25,12 +25,13 @@ import { recordSceneLine } from './voice.js';
 import { readUrl } from '../services/storage.service.js';
 import { AppError } from '../utils/AppError.js';
 import { discuss, fitToLength, writeScript, type AdBrief, type DirectorSummary } from './adDirector.js';
-import { companyAccess, loadCompany, type CompanyRow } from './companies.js';
+import { companyAccess, loadCompany, workspaceAccess, type CompanyRow } from './companies.js';
 import { loadProduct, type ProductRow } from './products.js';
 import { defaultEndCard } from './endCard.js';
 import { reviewAdTake } from './review.js';
 import { AD_STAGES, MAX_AD_SECONDS, type AdRules, type AdScript, type AdStage, type BriefInput, type EndCard, type VersionAspect } from './schemas.js';
 import { isStale, queueVersions, versionsView, type AdVersion } from './versions.js';
+import { requireKyc } from '../privacy/kyc.js';
 
 interface AdRow {
   projectId: string;
@@ -65,10 +66,12 @@ export const STAGE_LABEL: Record<AdStage, string> = {
 const BUILT: readonly AdStage[] = ['BRIEF', 'CHARACTERS', 'DIRECTOR', 'SCRIPT', 'SHOOT', 'MASTER'];
 
 async function loadAd(workspaceId: string, projectId: string): Promise<{ project: ProjectRow; ad: AdRow; company: CompanyRow; product: ProductRow }> {
-  const [project] = await sql<ProjectRow[]>`SELECT * FROM studio_projects WHERE id = ${projectId} AND workspace_id = ${workspaceId} AND kind = 'COMMERCIAL' AND deleted_at IS NULL`;
-  if (!project) throw AppError.notFound('Ad');
-  const [ad] = await sql<AdRow[]>`SELECT * FROM ad_projects WHERE project_id = ${projectId}`;
-  if (!ad) throw AppError.notFound('Ad');
+  // Both by project id, so they go together (one round trip instead of two).
+  const [[project], [ad]] = await Promise.all([
+    sql<ProjectRow[]>`SELECT * FROM studio_projects WHERE id = ${projectId} AND workspace_id = ${workspaceId} AND kind = 'COMMERCIAL' AND deleted_at IS NULL`,
+    sql<AdRow[]>`SELECT * FROM ad_projects WHERE project_id = ${projectId}`,
+  ]);
+  if (!project || !ad) throw AppError.notFound('Ad');
   const [company, product] = await Promise.all([loadCompany(workspaceId, ad.companyId), loadProduct(ad.companyId, ad.productId)]);
   return { project, ad, company, product };
 }
@@ -105,14 +108,15 @@ async function endCardLogoUrl(company: CompanyRow, productId: string): Promise<s
 }
 
 export async function view(auth: AuthContext, workspaceId: string, projectId: string) {
-  const { project, ad, company, product } = await loadAd(workspaceId, projectId);
-  await companyAccess(auth, workspaceId, ad.companyId, false);
-  const [messages, base, settings] = await Promise.all([
+  // Reading needs only workspace membership (companyAccess(read) is that + the company, loaded here anyway).
+  const [{ project, ad, company, product }] = await Promise.all([loadAd(workspaceId, projectId), workspaceAccess(auth, workspaceId, false)]);
+  const [messages, base, settings, logoUrl] = await Promise.all([
     sql<{ id: string; author: string; content: string; spoken: boolean; createdAt: Date }[]>`
       SELECT * FROM (SELECT id, author, content, spoken, created_at FROM ad_messages WHERE project_id = ${projectId} ORDER BY created_at DESC LIMIT 200) recent ORDER BY created_at`,
     // The studio's own view: takes (with reviews), output, progress and engine log, shared with music videos.
-    studio.getProject(auth, workspaceId, projectId),
+    studio.projectView(project),
     getStudioSettings(),
+    endCardLogoUrl(company, product.id),
   ]);
   const voices = new Map(base.assets.filter((asset) => asset.role === 'VOICE').map((asset) => [asset.id, asset]));
   const scenes = base.scenes.map((scene) => {
@@ -172,7 +176,7 @@ export async function view(auth: AuthContext, workspaceId: string, projectId: st
     endCard: {
       ...(ad.endCard ?? defaultEndCard({ callToAction: ad.callToAction, website: company.website, brandColours: company.brandColours })),
       saved: Boolean(ad.endCard),
-      logoUrl: await endCardLogoUrl(company, product.id),
+      logoUrl,
       brandColours: company.brandColours,
     },
     versions: await versionsView(ad.versions, project.outputKey, project.title),
@@ -190,6 +194,7 @@ export type AdView = Awaited<ReturnType<typeof view>>;
 
 export async function createAd(auth: AuthContext, workspaceId: string, companyId: string, productId: string, input: { title: string; aspect: '16:9' | '9:16' | '1:1'; category: ProjectCategory }) {
   await companyAccess(auth, workspaceId, companyId, true);
+  await requireKyc(auth.userId, 'commercial');
   const product = await loadProduct(companyId, productId);
   const created = await studio.createProject(auth, workspaceId, { kind: 'AI_VIDEO', category: input.category, title: input.title, aspect: input.aspect, brief: {} });
   // Created through the studio (access, defaults), then marked as a commercial.

@@ -31,7 +31,7 @@ import { getStudioSettings } from './settings.js';
 import { json, sql, type Tx } from './sql.js';
 import { settleBatch, takeCost } from './takes.js';
 import { sceneCasts, type SceneCast } from '../musicvideo/cast.js';
-import { songContext } from '../musicvideo/songmap.js';
+import { parseDirection, placeText, songContext } from '../musicvideo/songmap.js';
 import { cutToRange, syncPlan } from '../musicvideo/sync.js';
 import { ACTIVE_TAKE, DEFAULT_FINISH, type AssetRow, type Finish, type Identity, type ProjectRow, type SceneRow, type TakeRow, type TakeSpec } from './types.js';
 
@@ -80,13 +80,27 @@ const assertEditable = (project: ProjectRow): void => {
 
 const iso = (value: Date | null): string | null => (value ? value.toISOString() : null);
 
-async function takeView(take: TakeRow) {
+/**
+ * What the project view needs from a take: no full generation spec and no stored
+ * engine outputs (tens of KB per take, sent on every load and every poll).
+ */
+type TakeListRow = Pick<TakeRow, 'id' | 'sceneId' | 'status' | 'keyframeKey' | 'videoKey' | 'thumbKey' | 'durationSec' | 'cost' | 'error' | 'engine' | 'review' | 'createdAt' | 'finishedAt'> & {
+  edit: TakeSpec['edit'] | null;
+  hasOutputs: boolean;
+};
+
+const takeListQuery = (projectId: string) => sql<TakeListRow[]>`
+  SELECT id, scene_id, status, keyframe_key, video_key, thumb_key, duration_sec, cost, error, engine, review, created_at, finished_at,
+    spec->'edit' AS edit, (outputs IS NOT NULL AND outputs <> '{}'::jsonb) AS has_outputs
+  FROM studio_takes WHERE project_id = ${projectId} AND status <> 'CANCELED' ORDER BY created_at`;
+
+async function takeView(take: TakeListRow) {
   return {
     id: take.id,
     status: take.status,
     /** A failed take with paid fal.ai results (or a saved first frame) can resume without paying again. */
-    resumable: take.status === 'FAILED' && (Object.keys(take.outputs ?? {}).length > 0 || Boolean(take.keyframeKey)),
-    edit: take.spec.edit ? { kind: take.spec.edit.kind, sourceTakeId: take.spec.edit.sourceTakeId } : null,
+    resumable: take.status === 'FAILED' && (take.hasOutputs || Boolean(take.keyframeKey)),
+    edit: take.edit ? { kind: take.edit.kind, sourceTakeId: take.edit.sourceTakeId } : null,
     durationSec: take.durationSec,
     cost: take.cost,
     error: hideEngine(take.error),
@@ -140,13 +154,22 @@ function summary(project: ProjectRow) {
   };
 }
 
-async function fullView(project: ProjectRow) {
-  const [assets, scenes, takes, settings] = await Promise.all([
-    sql<AssetRow[]>`SELECT * FROM studio_assets WHERE project_id = ${project.id} ORDER BY created_at`,
+/**
+ * The project as the app shows it. Pass `assets` when the caller already loaded them
+ * (the music-video view does) so they are not fetched twice.
+ */
+export async function projectView(project: ProjectRow, preloaded: { assets?: AssetRow[] } = {}) {
+  return fullView(project, preloaded);
+}
+
+async function fullView(project: ProjectRow, preloaded: { assets?: AssetRow[] } = {}) {
+  const [assetRows, scenes, takes, settings] = await Promise.all([
+    preloaded.assets ? Promise.resolve(preloaded.assets) : sql<AssetRow[]>`SELECT * FROM studio_assets WHERE project_id = ${project.id} ORDER BY created_at`,
     sql<SceneRow[]>`SELECT * FROM studio_scenes WHERE project_id = ${project.id} ORDER BY position`,
-    sql<TakeRow[]>`SELECT * FROM studio_takes WHERE project_id = ${project.id} AND status <> 'CANCELED' ORDER BY created_at`,
+    takeListQuery(project.id),
     getStudioSettings(),
   ]);
+  const assets = [...assetRows].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   const starts = sceneStarts(scenes);
   return {
     ...summary(project),
@@ -170,6 +193,8 @@ async function fullView(project: ProjectRow) {
         photoAssetIds: scene.photoAssetIds,
         selectedTakeId: scene.selectedTakeId,
         kind: scene.kind ?? 'STORY',
+        title: scene.title ?? '',
+        subtitle: scene.subtitle ?? '',
         characterIds: scene.characterIds ?? [],
         costume: scene.costume ?? null,
         location: scene.location ?? null,
@@ -653,7 +678,12 @@ export async function generate(auth: AuthContext, workspaceId: string, projectId
   // The song's analysis (tempo, sections, energy) so each shot moves with its part of the song.
   const analysis = project.kind === 'MUSIC_VIDEO' && project.musicAssetId ? await songAnalysis(projectId, project.musicAssetId) : null;
   const [mvOptions] =
-    project.kind === 'MUSIC_VIDEO' ? await sql<{ creativeMode: boolean }[]>`SELECT creative_mode FROM mv_projects WHERE project_id = ${projectId}` : [];
+    project.kind === 'MUSIC_VIDEO'
+      ? await sql<{ creativeMode: boolean; direction: unknown; voice: Parameters<typeof placeText>[1] }[]>`
+          SELECT creative_mode, direction, lyrics -> 'voice' AS voice FROM mv_projects WHERE project_id = ${projectId}`
+      : [];
+  // Cast background + shoot location (the artist's choice, or the song's regional cue) on every shot.
+  const place = mvOptions ? placeText(parseDirection(mvOptions.direction), mvOptions.voice ?? null) : '';
   // Lyrics moved onto the edited mix's timeline (the transcript is timed on the original song;
   // after DAW cuts the words under a shot are different).
   const mixLines = project.kind === 'MUSIC_VIDEO' ? (await songContext(projectId, { analyse: false })).lines : [];
@@ -681,6 +711,7 @@ export async function generate(auth: AuthContext, workspaceId: string, projectId
         kind: project.kind,
         aspect: project.aspect,
         rhythm: rhythmAt(analysis, sceneStart, scene.durationSec),
+        ...(place ? { place } : {}),
         creative: mvOptions?.creativeMode ?? false,
         musicVideo: true,
         description: scene.description,

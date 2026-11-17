@@ -2,6 +2,8 @@
  * Process entry point: connects dependencies, starts HTTP, and shuts down
  * gracefully on SIGTERM/SIGINT (drain connections → close DB/Redis → exit).
  */
+// Must run before any socket opens (slow-link connect timeouts).
+import './config/network.js';
 import type { Server } from 'node:http';
 import { createApp } from './app.js';
 import { connectDatabase, disconnectDatabase, prisma } from './config/database.js';
@@ -12,6 +14,8 @@ import { recoverStudio, startStudioWorker, stopStudio } from './studio/queue.js'
 import { closeSql } from './studio/sql.js';
 import { BIN_DAYS, purgeExpiredBin } from './studio/service.js';
 import { runStorageLifecycle } from './storage/lifecycle.js';
+import { expireTrials } from './billing/trial.js';
+import { syncPortraits } from './billing/portraits.js';
 import { migrate } from './studio/sql.js';
 import { attachRealtime } from './realtime/ws.js';
 import { purgeExpiredRefreshTokens } from './services/auth.service.js';
@@ -130,6 +134,20 @@ async function main(): Promise<void> {
     intervalMs: 24 * HOUR,
     runOnBoot: true,
     run: async () => `${await purgeExpiredBin()} project(s) purged`,
+  });
+  scheduleJob({
+    name: 'expire-trials',
+    description: 'Ends free trials whose time is up and returns their unspent tokens (never purchased ones)',
+    intervalMs: HOUR,
+    runOnBoot: true,
+    run: expireTrials,
+  });
+  scheduleJob({
+    name: 'professional-portraits',
+    description: 'Catch-up for professional portraits: users whose first profile photo has no set yet, and sets to retry (no waiting)',
+    intervalMs: HOUR,
+    runOnBoot: true,
+    run: syncPortraits,
   });
   scheduleJob({
     name: 'storage-lifecycle',

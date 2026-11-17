@@ -9,6 +9,7 @@ import { requireMembership } from '../services/workspace.service.js';
 import { readUrl } from '../services/storage.service.js';
 import { sql } from '../studio/sql.js';
 import { AppError } from '../utils/AppError.js';
+import { requireKyc } from '../privacy/kyc.js';
 import type { CompanyInput } from './schemas.js';
 
 export interface CompanyRow {
@@ -84,6 +85,7 @@ export async function listCompanies(auth: AuthContext, workspaceId: string) {
 
 export async function createCompany(auth: AuthContext, workspaceId: string, input: CompanyInput) {
   await workspaceAccess(auth, workspaceId, true);
+  await requireKyc(auth.userId, 'commercial');
   const [row] = await sql<CompanyRow[]>`
     INSERT INTO companies (workspace_id, name, legal_name, registration_no, country, industry, website, description, tone, brand_colours, created_by_id)
     VALUES (${workspaceId}, ${input.name}, ${input.legalName || null}, ${input.registrationNo || null}, ${input.country ?? null}, ${input.industry || null},

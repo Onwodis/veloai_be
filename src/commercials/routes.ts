@@ -35,6 +35,7 @@ import * as ads from './ads.js';
 import * as companies from './companies.js';
 import * as products from './products.js';
 import { finishSchema } from '../studio/schemas.js';
+import { projectVersion } from '../studio/version.js';
 import { AD_STAGES, briefSchema, companySchema, createAdSchema, endCardSchema, memberSchema, productAssetSchema, productSchema, scriptRequestSchema, scriptSchema, versionsSchema } from './schemas.js';
 
 const uuid = z.uuid();
@@ -129,6 +130,12 @@ companyRouter.post('/:companyId/products/:productId/ads', validate({ params: pro
 export const adRouter: Router = Router({ mergeParams: true });
 adRouter.use(authenticate);
 
+/** The change fingerprint: the ad page polls this and reloads only when it changes. */
+adRouter.get('/:projectId/version', validate({ params: adParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, adParams);
+  await companies.workspaceAccess(requireAuth(req), workspaceId, false);
+  return { version: await projectVersion(workspaceId, projectId) };
+}));
 adRouter.get('/:projectId', validate({ params: adParams }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, adParams);
   return { ad: await ads.view(requireAuth(req), workspaceId, projectId) };

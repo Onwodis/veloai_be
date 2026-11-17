@@ -50,9 +50,11 @@ export interface DirectorContext {
   songMap?: string;
   /** Opening titles as they stand (null = none yet). */
   titles?: Titles | null;
+  /** Cast background + shoot location (the artist's, or the song's regional cue). */
+  place?: string;
 }
 
-function contextText(context: DirectorContext): string {
+export function contextText(context: DirectorContext): string {
   const cast = context.characters
     .map(
       (character, index) =>
@@ -80,6 +82,9 @@ function contextText(context: DirectorContext): string {
       'light from real sources, real places with real texture, story intercut with performance. Subtle, human, believable.</craft>',
     context.creativeMode
       ? '<creative_mode>ON: more deliberate, musical camera work, still real-world: slow push-ins that land on the downbeat, smooth tracking moves with the artist, an occasional slow drone reveal for big moments. No gimmicks.</creative_mode>'
+      : '',
+    context.place
+      ? `<cast_and_place>${context.place}. Every scene is set here and its supporting cast, extras and crowd follow this mix; characters cast from photos keep their own looks. Write locations, extras and wardrobe that are true to this place.</cast_and_place>`
       : '',
     context.songMap ? context.songMap.slice(0, 9000) : context.lyrics ? `<lyrics>\n${context.lyrics.slice(0, 6000)}\n</lyrics>` : '<lyrics>not transcribed</lyrics>',
     `</song>`,
@@ -254,6 +259,8 @@ export async function detectPeople(
 /* ------------------------------------------------------------------ one scene */
 
 const PlannedScene = z.object({
+  title: z.string().describe('A short, evocative scene name for the storyboard card, 2-5 words (e.g. "Rooftop at dusk", "The phone call")'),
+  subtitle: z.string().describe('One short line under the title: the song part and the place, e.g. "Verse 1 · Lagos rooftop"'),
   description: z.string().describe("One or two plain sentences of what happens, in the artist's terms"),
   prompt: z
     .string()
@@ -264,7 +271,11 @@ const PlannedScene = z.object({
     ),
   shot: z.enum(SHOT_IDS),
   transition: z.enum(TRANSITION_IDS).describe('Transition INTO the next scene'),
-  durationSec: z.number().describe('Seconds on screen, 3-10'),
+  durationSec: z
+    .number()
+    .describe(
+      'Seconds on screen, 3-10. Give the scene the time its action, place and details need to play out (usually 6-10 s; the video model renders up to 10 s, so a short scene throws detail away). Under 5 s only for deliberate quick cuts on a fast, high-energy part.',
+    ),
   location: z.string().describe('Short location name'),
   timeOfDay: z.string().describe('e.g. golden hour, night, dawn'),
   costume: z.string().describe('What the cast wears in this scene (from their costumes when given)'),
@@ -289,6 +300,11 @@ const PlannedScene = z.object({
     .number()
     .int()
     .describe('1 = subtle (verses, intimate lines), 2 = natural, 3 = full out (big hooks, belted notes, the final chorus)'),
+  why: z
+    .string()
+    .describe(
+      "For the artist, 2-4 plain sentences: what you planned or changed (shot, length, place, cast, lip sync, emotion) and WHY, tied to the song (section, lyric, energy), the story and the artist's notes. No filler.",
+    ),
 });
 export type PlannedMvScene = Omit<z.infer<typeof PlannedScene>, 'characterIndexes'> & { characterIds: string[] };
 
@@ -373,6 +389,10 @@ export async function discuss(context: DirectorContext, history: { author: 'CREA
       `Tie ideas to the song's lyrics and structure (intro, verses, hooks, bridge, outro), using the song map when given. ` +
       'You also own the opening: discuss a proper music-video opening with the artist (production credit, record label, artist and song title cards, and story text cards on black when the story needs a set-up), ' +
       'ask for their real company / label names if unknown, and propose it in the titles field. ' +
+      (context.place
+        ? ''
+        : 'Information gathering: the cast background and the shoot location are not set yet. Early in the conversation ask where the video is shot and who the supporting cast and extras are ' +
+          '(for example "Lagos or London?", "do you want Black and white people mixed, or an all-local cast?"); the artist sets them in Direction → Cast and location. ') +
       `${PRO_RULES} ${RULES}`,
     [{ type: 'text', text: `${contextText(context)}\n\n<conversation>\n${transcript || '(start)'}\n</conversation>\n\n<artist_message>${message}</artist_message>` }],
   );
@@ -470,6 +490,43 @@ const PolishSchema = z.object({
  * languages, and rewrites every other line that is unclear or badly
  * transcribed, including pidgin and exclamations. Suggestions only.
  */
+const VoiceSchema = z.object({
+  accent: z.string().describe('How the singing sounds from the words and spelling, e.g. "Nigerian (Lagos) English with Pidgin", "London (MLE) English", "Jamaican Patois", "Southern US". Empty when unclear.'),
+  region: z.string().describe('The country / region the song most likely speaks to, e.g. "Lagos, Nigeria", "Accra, Ghana", "South London, UK", "Atlanta, USA". Empty when unclear.'),
+  confidence: z.enum(['low', 'medium', 'high']),
+  note: z.string().describe('One sentence: the clues (languages, slang, place names, references) behind it.'),
+});
+export type VoiceProfile = z.infer<typeof VoiceSchema>;
+
+/**
+ * The song's voice as a background cue: accent, language and the region the
+ * song speaks to, read from the transcribed words (languages, slang, pidgin,
+ * places named). Used only when the artist has not set the cast background
+ * and the shoot location themselves. Never a guess at anyone's race or skin
+ * colour: a voice does not tell you that, and the artist's own choice wins.
+ */
+export async function profileVoice(lines: { text: string }[], context: { title: string; artist: string; genre: string; language: string | null }): Promise<VoiceProfile & { engine: string }> {
+  const text = lines
+    .map((line) => line.text.trim())
+    .filter(Boolean)
+    .join('\n')
+    .slice(0, 12000);
+  const { data, engine } = await parse(
+    'music-video',
+    VoiceSchema,
+    'You read sung lyrics (an automatic transcript) and describe the singing voice\'s accent and the region the song most likely speaks to, from the evidence in the words only: ' +
+      'languages and code-switching, pidgin / creole, slang, spelling, ad-libs, places and cultural references named. This is used as a cue for where a music video is set and who appears in it. ' +
+      'Do not guess race, ethnicity or skin colour, and do not use the artist\'s name as evidence. If the words do not point anywhere, leave accent and region empty with low confidence.',
+    [
+      {
+        type: 'text',
+        text: `<song title="${context.title}" artist="${context.artist}" genre="${context.genre}" detected_language="${context.language ?? 'unknown'}"/>\n<lyrics>\n${text || '(no words)'}\n</lyrics>`,
+      },
+    ],
+  );
+  return { ...data, engine };
+}
+
 export async function polishLyrics(
   lines: { start: number; end: number; text: string }[],
   samples: string,

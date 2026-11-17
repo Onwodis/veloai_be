@@ -20,7 +20,9 @@ import { authenticate, requireAuth } from '../middleware/authenticate.js';
 import { authorize } from '../middleware/authorize.js';
 import { validate, validBody, validParams, validQuery } from '../middleware/validate.js';
 import * as support from '../support/service.js';
+import { assetDetail, browseAssets } from './assetBrowser.js';
 import { commandCenter } from './commandCenter.js';
+import { insights } from './insights.js';
 import * as admin360 from './service.js';
 
 type Handler = (req: Request, res: Response) => Promise<unknown>;
@@ -115,3 +117,31 @@ const rangeQuery = z.strictObject({ range: z.coerce.number().int().refine((value
 export const commandCenterRouter: Router = Router();
 commandCenterRouter.use(authenticate, authorize('SUPER_ADMIN'));
 commandCenterRouter.get('/', validate({ query: rangeQuery }), send(async (_req, res) => commandCenter(validQuery(res, rangeQuery).range)));
+
+/* ------------------------------------------------------------------ asset browser */
+
+const browseQuery = z.strictObject({
+  kind: z.enum(['TAKE', 'MASTER']).default('TAKE'),
+  userId: z.uuid().optional(),
+  projectKind: z.enum(['MUSIC_VIDEO', 'COMMERCIAL', 'AI_VIDEO']).optional(),
+  status: z.enum(['READY', 'FAILED', 'RUNNING']).optional(),
+  review: z.enum(['FLAG', 'GOOD', 'UNREVIEWED']).optional(),
+  q: z.string().trim().max(80).optional(),
+  page: z.coerce.number().int().min(1).max(10_000).default(1),
+  pageSize: z.coerce.number().int().min(6).max(60).default(24),
+});
+const assetParams = z.strictObject({ kind: z.enum(['TAKE', 'MASTER']), id: z.uuid() });
+export const assetBrowserRouter: Router = Router();
+assetBrowserRouter.use(authenticate, authorize('SUPER_ADMIN'));
+assetBrowserRouter.get('/', validate({ query: browseQuery }), send(async (_req, res) => browseAssets(validQuery(res, browseQuery))));
+assetBrowserRouter.get('/:kind/:id', validate({ params: assetParams }), send(async (_req, res) => {
+  const { kind, id } = validParams(res, assetParams);
+  return assetDetail(kind, id);
+}));
+
+/* ------------------------------------------------------------------ traffic & security insights */
+
+const insightsQuery = z.strictObject({ range: z.coerce.number().int().refine((value) => [1, 7, 30, 90].includes(value)).default(7) });
+export const insightsRouter: Router = Router();
+insightsRouter.use(authenticate, authorize('SUPER_ADMIN'));
+insightsRouter.get('/', validate({ query: insightsQuery }), send(async (_req, res) => insights(validQuery(res, insightsQuery).range)));

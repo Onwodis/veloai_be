@@ -68,6 +68,8 @@ export type CreationStatus = 'QUEUED' | 'DIRECTING' | 'IMAGING' | 'ANIMATING' | 
 export const ACTIVE_CREATION: readonly CreationStatus[] = ['QUEUED', 'DIRECTING', 'IMAGING', 'ANIMATING', 'ENHANCING', 'STORING'];
 
 export interface CreationOptions {
+  /** Platform marketing assets made by the super admin: no watermark. */
+  brandFree?: boolean;
   /** Final detail pass on stills. */
   upscale?: boolean;
   /** Let the director rewrite the prompt (default true). */

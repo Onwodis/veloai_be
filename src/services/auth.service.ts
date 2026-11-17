@@ -21,6 +21,7 @@ import { logger } from '../utils/logger.js';
 import { getDummyHash, hashPassword, passwordNeedsRehash, verifyPassword } from '../utils/password.js';
 import { signAccessToken, signChallengeToken, signRefreshToken, verifyRefreshToken } from '../utils/tokens.js';
 import { recordSecurityEvent, type RequestMeta } from './securityEvent.service.js';
+import { recordSignupConsents } from '../privacy/service.js';
 
 export interface SessionTokens {
   accessToken: string;
@@ -169,6 +170,14 @@ export async function register(input: RegisterInput, meta: RequestMeta): Promise
     select: { id: true, email: true, totpEnabledAt: true },
   });
 
+  // Consent is part of creating the account: if it cannot be recorded, the
+  // account is removed again rather than left without a lawful record.
+  try {
+    await recordSignupConsents(user.id, input.consents, meta);
+  } catch (error) {
+    await prisma.user.delete({ where: { id: user.id } }).catch(() => undefined);
+    throw error;
+  }
   await recordSecurityEvent('REGISTERED', meta, user.id);
   return challengeFor(user);
 }

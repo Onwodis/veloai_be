@@ -36,6 +36,8 @@ export interface CreateInput {
   upscale: boolean;
   direct: boolean;
   dryRun: boolean;
+  /** Super admin only (platform marketing): skip the watermark. */
+  brandFree?: boolean;
 }
 
 /* ------------------------------------------------------------------ estimate */
@@ -138,6 +140,7 @@ export async function createCreation(auth: AuthContext, workspaceId: string, inp
     upscale: input.mode !== 'VIDEO' && input.upscale,
     direct,
     costs: { direction: estimate.direction, image: estimate.image, video: estimate.video, upscale: estimate.upscale },
+    ...(input.brandFree && auth.role === 'SUPER_ADMIN' ? { brandFree: true } : {}),
   };
   try {
     const [row] = await withUser(auth, (tx) => tx<CreationRow[]>`

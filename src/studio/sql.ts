@@ -5,6 +5,8 @@
  * statements are off because PgBouncer in transaction mode can't keep them).
  * Schema changes run over the direct, non-pooled host: see `migrate()`.
  */
+// Scripts reach the database through this module: apply the connect settings here too.
+import '../config/network.js';
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +16,9 @@ import { logger } from '../utils/logger.js';
 
 export const sql = postgres(env.DATABASE_URL, {
   max: 10,
-  idle_timeout: 30,
+  // Keep connections warm for 4 minutes: a fresh TLS connection to Neon costs several
+  // round trips (seconds on a slow link), and with 30 s most requests paid for one.
+  idle_timeout: 240,
   // A suspended Neon compute can take a while to wake.
   connect_timeout: 30,
   prepare: false,
@@ -32,14 +36,27 @@ export const json = (value: unknown): postgres.Parameter => sql.json(value as po
 /** Connection errors where the statement never ran, so a retry can't apply it twice. */
 const TRANSIENT = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'CONNECT_TIMEOUT', 'CONNECTION_CLOSED', 'CONNECTION_ENDED', 'CONNECTION_DESTROYED', '57P01', '08006', '08001']);
 
+/**
+ * True when the database could not be reached (the statement never ran).
+ * Node reports a failed multi-address connect as an AggregateError whose own
+ * code may be missing, with the real codes on its inner errors.
+ */
+export function isTransientDbError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === 'string' && TRANSIENT.has(code)) return true;
+  const inner = (error as { errors?: unknown }).errors;
+  return Array.isArray(inner) && inner.some((item) => isTransientDbError(item));
+}
+
 /** Retries a query through momentary Neon outages (0.5 s, 1 s, 2 s, 4 s). */
 export async function withSqlRetry<T>(fn: () => Promise<T>, attempts = 5): Promise<T> {
   for (let attempt = 1; ; attempt += 1) {
     try {
       return await fn();
     } catch (error) {
-      const code = (error as { code?: string }).code ?? '';
-      if (!TRANSIENT.has(code) || attempt >= attempts) throw error;
+      const code = (error as { code?: string }).code ?? 'AGGREGATE';
+      if (!isTransientDbError(error) || attempt >= attempts) throw error;
       const delay = 500 * 2 ** (attempt - 1);
       logger.warn({ attempt, delay, code }, 'studio database unreachable, retrying');
       await new Promise((resolve) => setTimeout(resolve, delay));

@@ -213,6 +213,7 @@ export async function runTake(takeId: string): Promise<void> {
     featuresSubject: spec.featuresSubject,
     aspect: spec.aspect,
     rhythm: spec.rhythm,
+    place: spec.place,
     creative: spec.creative,
     musicVideo: spec.musicVideo,
     lipSync: Boolean(spec.lipSync && spec.music && models.lipSync.enabled),

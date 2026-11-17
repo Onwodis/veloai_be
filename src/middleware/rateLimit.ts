@@ -58,3 +58,8 @@ export const visitLimiter = limiter('visit', { windowMs: 60_000, limit: 60 });
 
 /** Token refresh: generous for many tabs, tight enough to stop token grinding. */
 export const refreshLimiter = limiter('refresh', { windowMs: 15 * 60_000, limit: 60 });
+
+/** Identity documents and data requests: rare actions, tight limits. */
+export const kycLimiter = limiter('kyc', { windowMs: 60 * 60_000, limit: 30 });
+export const dataRequestLimiter = limiter('data-request', { windowMs: 24 * 60 * 60_000, limit: 10 });
+export const exportLimiter = limiter('data-export', { windowMs: 60 * 60_000, limit: 5 });

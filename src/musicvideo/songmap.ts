@@ -31,17 +31,60 @@ export const directionSchema = z.strictObject({
   lyricApproach: z.enum(['literal', 'metaphorical', 'abstract']),
   /** Choruses always return to the same hero performance set-up (location, look, framing). */
   chorusHome: z.boolean(),
+  /** Who the supporting cast, extras and crowd are (asked during information gathering). auto = follow the song's regional cue. */
+  castBackground: z.enum(['auto', 'local', 'black', 'white', 'black_white', 'diverse', 'south_asian', 'east_asian', 'latino', 'middle_eastern', 'custom']),
+  /** The artist's own words on the cast mix (with "custom", or added detail). */
+  castNote: z.string().trim().max(200),
+  /** Where the video is shot ("Lagos, Nigeria", "a beach in Accra", "South London estate"). Empty = follow the song's cue. */
+  shootLocation: z.string().trim().max(160),
 });
 export type Direction = z.infer<typeof directionSchema>;
 
-export const DEFAULT_DIRECTION: Direction = { performanceShare: 0.5, pace: 'medium', lyricApproach: 'metaphorical', chorusHome: true };
+export const DEFAULT_DIRECTION: Direction = { performanceShare: 0.5, pace: 'medium', lyricApproach: 'metaphorical', chorusHome: true, castBackground: 'auto', castNote: '', shootLocation: '' };
+
+export const CAST_LABEL: Record<Direction['castBackground'], string> = {
+  auto: '',
+  local: 'people who look local to the shoot location',
+  black: 'Black people',
+  white: 'white people',
+  black_white: 'a natural mix of Black and white people',
+  diverse: 'a natural, diverse mix of backgrounds',
+  south_asian: 'South Asian people',
+  east_asian: 'East Asian people',
+  latino: 'Latino / Hispanic people',
+  middle_eastern: 'Middle Eastern / North African people',
+  custom: '',
+};
+
+/**
+ * Cast background + shoot location as one line for the director and every
+ * shot prompt. The artist's settings win; when they left them open, the
+ * song's regional cue (from the words: languages, slang, places) fills in the
+ * place and a local cast. Empty when there is nothing to go on.
+ */
+export function placeText(direction: Direction, voice?: Lyrics['voice']): string {
+  const cue = voice && voice.region && voice.confidence !== 'low' ? voice.region : '';
+  const location = direction.shootLocation || (cue ? `${cue} (the song's own setting, from its language and accent)` : '');
+  const custom = direction.castNote.trim();
+  let cast = '';
+  if (direction.castBackground === 'custom') cast = custom;
+  else if (direction.castBackground === 'auto') cast = cue ? `people commonly seen in ${direction.shootLocation || cue}` : custom;
+  else cast = `${CAST_LABEL[direction.castBackground]}${custom ? ` (${custom})` : ''}`;
+  return [location ? `Shot in ${location}` : '', cast ? `supporting cast, extras and crowd: ${cast}` : ''].filter(Boolean).join('; ');
+}
 
 export function parseDirection(value: unknown): Direction {
   const parsed = directionSchema.partial().safeParse(value ?? {});
   return { ...DEFAULT_DIRECTION, ...(parsed.success ? parsed.data : {}) };
 }
 
-export const PACE_LABEL: Record<Direction['pace'], string> = { slow: 'a cut every 2-4 bars', medium: 'a cut every 1-2 bars', fast: 'a cut on most bars' };
+// Scenes are the units the video model renders (up to 10 s each): too short and the detail is lost.
+// Faster cutting inside a scene is the editor's job (trims / quick-clip), not more, shorter scenes.
+export const PACE_LABEL: Record<Direction['pace'], string> = {
+  slow: 'scenes of about 8-10 s (2-4 bars), letting the story breathe',
+  medium: 'scenes of about 6-9 s (2-3 bars)',
+  fast: 'scenes of about 4-7 s (1-2 bars), quicker cuts on the high-energy parts only',
+};
 export const APPROACH_LABEL: Record<Direction['lyricApproach'], string> = {
   literal: 'the pictures show what the words say',
   metaphorical: 'a story that mirrors the words without illustrating each line',
@@ -152,7 +195,9 @@ export function songMapText(context: SongContext, direction: Direction): string 
 
 export const PRO_RULES =
   'Cut it like a professional music video. Scene boundaries sit on the song: section changes and bar lines (downbeats), never in the middle of a sung word. ' +
-  'PERFORMANCE scenes (lip sync) only where the song map shows vocals, framed medium close-up or close-up, face toward the lens, mouth clear, 3-7 s; ' +
+  'PERFORMANCE scenes (lip sync) only where the song map shows vocals, framed medium close-up or close-up, face toward the lens, mouth clear, 5-9 s (a whole line or two, never half a phrase); ' +
+  'every scene runs long enough for its action and details to play out (usually 6-10 s): fewer, fuller scenes beat many thin ones. ' +
+  'Aerial / drone shots sit on drops, kicks and big entrances: their move (rise, push, turn) starts on the beat that hits. ' +
   'the artist sings the words under that scene (lip-synced afterwards from the isolated vocal) with the line\'s emotion on the whole face and body: set emotion + intensity per scene (soft verse = subtle, full-voice hook = full out). ' +
   'Hums, "ooh"/"mm" lines, low or whispered choruses and cool laid-back lines are intensity 1: sung softly, lips barely part, no forced mouth shapes (a real singer does not open wide to hum). ' +
   'NARRATIVE scenes act out what the words under them are about, following the lyric approach; one clear action each; nobody mouths words. ' +

@@ -169,6 +169,9 @@ export interface SceneRow {
   selectedTakeId: string | null;
   /** Music video director (migration 004). */
   kind: 'INTRO' | 'STORY' | 'OUTRO';
+  /** The artist's names for the scene (migration 038); labels only. */
+  title?: string;
+  subtitle?: string;
   characterIds: string[];
   costume: string | null;
   location: string | null;
@@ -248,6 +251,8 @@ export interface TakeSpec {
     | undefined;
   /** Music videos: the song under this shot (tempo, section, energy). */
   rhythm?: { bpm: number | null; section: string; energy: number } | undefined;
+  /** Music videos: who is on screen and where it is shot (the artist's cast background + location, or the song's regional cue). */
+  place?: string | undefined;
   /** Music videos: bold, sharp AI camera work (creative mode). */
   creative?: boolean | undefined;
   /** Music videos: pop short-film performance standard in every prompt. */

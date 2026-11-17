@@ -54,8 +54,14 @@ import { validate, validBody, validParams, validQuery } from '../middleware/vali
 import { PERFORMANCE_EMOTION_IDS, SHOT_IDS, TRANSITION_IDS } from '../studio/cinema.js';
 import { finishSchema } from '../studio/schemas.js';
 import { titleCase } from '../utils/names.js';
+import * as characterLook from './characterLook.js';
 import * as photos from './photos.js';
+import * as quickClip from './quickClip.js';
+import * as prologue from './prologue.js';
+import * as remix from './remix.js';
+import * as sceneTools from './sceneTools.js';
 import * as director from './service.js';
+import { projectVersion } from '../studio/version.js';
 import { directionSchema } from './songmap.js';
 import { titlesSchema } from './titles.js';
 
@@ -95,6 +101,25 @@ const songSchema = z.strictObject({
 });
 const lyricsSchema = z.strictObject({ lines: z.array(z.strictObject({ start: z.number().min(0).max(1200), end: z.number().min(0).max(1200), text: text(300) })).max(600) });
 const range = { start: z.number().min(0).max(1200), end: z.number().min(0).max(1200) };
+/** A channel strip (see TrackFx in audio.ts). */
+const fxSchema = z.strictObject({
+  pan: z.number().min(-1).max(1).optional(),
+  width: z.number().min(0).max(2).optional(),
+  lowDb: z.number().min(-12).max(12).optional(),
+  midDb: z.number().min(-12).max(12).optional(),
+  midHz: z.number().min(200).max(6000).optional(),
+  highDb: z.number().min(-12).max(12).optional(),
+  highpassHz: z.number().min(0).max(2000).optional(),
+  lowpassHz: z.number().min(0).max(20000).optional(),
+  denoise: z.number().min(0).max(1).optional(),
+});
+const trackSchema = z.strictObject({
+  id: z.string().trim().min(1).max(64),
+  name: z.string().trim().min(1).max(60),
+  gainDb: z.number().min(-60).max(12),
+  muted: z.boolean().optional(),
+  fx: fxSchema.optional(),
+});
 const audioSchema = z.strictObject({
   edits: z.strictObject({
     regions: z
@@ -129,7 +154,9 @@ const audioSchema = z.strictObject({
     gainDb: z.number().min(-24).max(12).optional(),
     // The storyboard arrangement / imported tracks ride along unchanged (a Sound-stage save drops the clips).
     clips: z.array(z.unknown()).optional(),
-    tracks: z.array(z.strictObject({ id: text(64), name: text(60), gainDb: z.number().min(-60).max(12), muted: z.boolean().optional() })).max(16).optional(),
+    tracks: z.array(trackSchema).max(16).optional(),
+    musicFx: fxSchema.optional(),
+    overlayFx: fxSchema.optional(),
   }),
   loudnessLufs: z.number().min(-30).max(-6).optional(),
 });
@@ -166,6 +193,8 @@ const characterSchema = z.strictObject({
 });
 const newCharacterSchema = characterSchema.extend({ role: ROLE, name: named(80, 'Give the character a name') });
 const sceneSchema = z.strictObject({
+  title: z.string().trim().max(80).optional(),
+  subtitle: z.string().trim().max(120).optional(),
   description: text(1000).min(3).optional(),
   prompt: text(2000).optional(),
   shot: z.enum(SHOT_IDS).optional(),
@@ -184,7 +213,7 @@ const sceneSchema = z.strictObject({
 });
 const messageTitlesParams = projectParams.extend({ messageId: uuid });
 const directionBody = directionSchema.partial().strict();
-const newSceneSchema = sceneSchema.extend({ description: text(1000).min(3) });
+const newSceneSchema = sceneSchema.extend({ description: text(1000).min(3), afterSceneId: uuid.optional() });
 const orderSchema = z.strictObject({ order: z.array(uuid).max(120) });
 const expandSchema = z.strictObject({ notes: text(1000).optional() });
 const messageSchema = z.strictObject({ message: text(3000).min(2) });
@@ -207,6 +236,12 @@ musicVideoRouter.get('/', validate({ params: workspaceParams, query: listQuery }
 })));
 musicVideoRouter.post('/', validate({ params: workspaceParams, body: createSchema }), send(async (req, res) => ({ project: await director.create(requireAuth(req), p(res, workspaceParams).workspaceId, validBody(req, createSchema)) })));
 
+/** The change fingerprint: pages poll this and reload the project only when it changes. */
+musicVideoRouter.get('/:projectId/version', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  await director.access(requireAuth(req), workspaceId, false);
+  return { version: await projectVersion(workspaceId, projectId) };
+}));
 musicVideoRouter.get('/:projectId', validate({ params: projectParams }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);
   return { project: await director.view(requireAuth(req), workspaceId, projectId) };
@@ -287,6 +322,12 @@ musicVideoRouter.delete('/:projectId/characters/:characterId/media/:assetId', va
   const { workspaceId, projectId, characterId, assetId } = p(res, mediaParams);
   return { project: await director.removeCharacterMedia(requireAuth(req), workspaceId, projectId, characterId, assetId) };
 }));
+/* No real photo: create the character's look (portrait + full body) from the description, then the casting sheet. */
+const lookBody = z.strictObject({ dryRun: z.boolean().default(false) });
+musicVideoRouter.post('/:projectId/characters/:characterId/create-look', validate({ params: characterParams, body: lookBody }), send(async (req, res) => {
+  const { workspaceId, projectId, characterId } = p(res, characterParams);
+  return characterLook.createCharacterLook(requireAuth(req), workspaceId, projectId, characterId, validBody(req, lookBody), req.ip ?? null);
+}));
 musicVideoRouter.post('/:projectId/characters/:characterId/consent', validate({ params: characterParams }), send(async (req, res) => {
   const { workspaceId, projectId, characterId } = p(res, characterParams);
   return { project: await director.consentCharacter(requireAuth(req), workspaceId, projectId, characterId, req.ip ?? null) };
@@ -336,7 +377,7 @@ musicVideoRouter.delete('/:projectId/scenes/:sceneId', validate({ params: sceneP
 }));
 musicVideoRouter.post('/:projectId/scenes/:sceneId/expand', validate({ params: sceneParams, body: expandSchema }), send(async (req, res) => {
   const { workspaceId, projectId, sceneId } = p(res, sceneParams);
-  return { project: await director.expand(requireAuth(req), workspaceId, projectId, sceneId, validBody(req, expandSchema).notes) };
+  return director.expand(requireAuth(req), workspaceId, projectId, sceneId, validBody(req, expandSchema).notes);
 }));
 musicVideoRouter.post('/:projectId/scenes/:sceneId/approve', validate({ params: sceneParams }), send(async (req, res) => {
   const { workspaceId, projectId, sceneId } = p(res, sceneParams);
@@ -436,9 +477,18 @@ const layersSchema = z.strictObject({
         trimEnd: z.number().min(0).max(1200),
         fadeIn: z.number().min(0).max(30),
         fadeOut: z.number().min(0).max(30),
+        // The imported track the event sits on (none = the overlay lane).
+        track: z.string().trim().min(1).max(64).optional(),
+        muted: z.boolean().optional(),
       }),
     )
-    .max(12),
+    .max(60),
+});
+const mixerSchema = z.strictObject({
+  tracks: z.array(trackSchema).max(16),
+  layers: layersSchema.shape.layers,
+  musicFx: fxSchema.optional(),
+  overlayFx: fxSchema.optional(),
 });
 const analysisQuery = z.strictObject({ which: z.enum(['mix', 'original']).default('mix') });
 musicVideoRouter.get('/:projectId/audio/analysis', validate({ params: projectParams, query: analysisQuery }), send(async (req, res) => {
@@ -470,10 +520,7 @@ const clipsSchema = z.strictObject({
   /** Whole-track level of the song (the gain knob). */
   gainDb: z.number().min(-24).max(12).optional(),
   /** Imported audio tracks + their events. */
-  tracks: z
-    .array(z.strictObject({ id: z.string().trim().min(1).max(64), name: z.string().trim().min(1).max(60), gainDb: z.number().min(-60).max(12), muted: z.boolean().optional() }))
-    .max(16)
-    .optional(),
+  tracks: z.array(trackSchema).max(16).optional(),
   layers: z
     .array(
       z.strictObject({
@@ -506,6 +553,65 @@ musicVideoRouter.get('/:projectId/audio/source', validate({ params: projectParam
   res.setHeader('Cache-Control', 'private, max-age=3600');
   await pipeline(source.body, res);
 });
+/* Cold open: a short narrated film VeloBot directs to play before the song (prologue.ts). */
+const prologuePlanBody = z.strictObject({ idea: z.string().trim().max(4000).optional(), seconds: z.number().min(10).max(45).default(20) });
+const prologueSaveBody = z.strictObject({ plan: prologue.planSchema.optional(), enabled: z.boolean().optional() });
+const prologueFilmBody = z.strictObject({ dryRun: z.boolean().default(false) });
+musicVideoRouter.get('/:projectId/prologue', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return prologue.prologueView(requireAuth(req), workspaceId, projectId);
+}));
+musicVideoRouter.post('/:projectId/prologue/plan', validate({ params: projectParams, body: prologuePlanBody }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  const body = validBody(req, prologuePlanBody);
+  return prologue.planPrologue(requireAuth(req), workspaceId, projectId, { idea: body.idea, seconds: body.seconds });
+}));
+musicVideoRouter.put('/:projectId/prologue', validate({ params: projectParams, body: prologueSaveBody }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  const body = validBody(req, prologueSaveBody);
+  return prologue.savePrologue(requireAuth(req), workspaceId, projectId, { plan: body.plan, enabled: body.enabled });
+}));
+musicVideoRouter.post('/:projectId/prologue/film', validate({ params: projectParams, body: prologueFilmBody }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return prologue.filmPrologue(requireAuth(req), workspaceId, projectId, validBody(req, prologueFilmBody).dryRun);
+}));
+
+/* Remix studio: a music video clip → a new short clip of its main character (remix.ts). */
+const remixSchema = z.strictObject({
+  mode: z.enum(['NEW', 'REFINE']),
+  script: z.string().trim().min(20).max(4000),
+  sourceAssetId: z.uuid(),
+  audioAssetId: z.uuid().nullable().optional(),
+  windowStart: z.number().min(0).max(1200),
+  windowLength: z.number().min(remix.WINDOW_MIN).max(remix.WINDOW_MAX),
+  artistName: z.string().trim().min(1).max(80),
+  genre: z.string().trim().max(60).optional(),
+  shootNow: z.boolean().optional(),
+  consent: z.boolean(),
+});
+const remixEstimateQuery = z.strictObject({
+  mode: z.enum(['NEW', 'REFINE']),
+  windowLength: z.coerce.number().min(remix.WINDOW_MIN).max(remix.WINDOW_MAX),
+  songSeconds: z.coerce.number().min(0).max(3600),
+  shootNow: z.enum(['true', 'false']).default('false'),
+});
+musicVideoRouter.get('/:projectId/remix', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return remix.remixView(requireAuth(req), workspaceId, projectId);
+}));
+musicVideoRouter.get('/:projectId/remix/estimate', validate({ params: projectParams, query: remixEstimateQuery }), send(async (_req, res) => {
+  const query = validQuery(res, remixEstimateQuery);
+  return remix.remixEstimate({ mode: query.mode, windowLength: query.windowLength, songSeconds: query.songSeconds, shootNow: query.shootNow === 'true' });
+}));
+musicVideoRouter.post('/:projectId/remix', validate({ params: projectParams, body: remixSchema }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return remix.startRemix(requireAuth(req), workspaceId, projectId, validBody(req, remixSchema), req.ip ?? null);
+}));
+musicVideoRouter.put('/:projectId/audio/mixer', validate({ params: projectParams, body: mixerSchema }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  const body = validBody(req, mixerSchema);
+  return { project: await director.saveMixer(requireAuth(req), workspaceId, projectId, { tracks: body.tracks, layers: body.layers, musicFx: body.musicFx, overlayFx: body.overlayFx }) };
+}));
 musicVideoRouter.put('/:projectId/audio/layers', validate({ params: projectParams, body: layersSchema }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);
   return { project: await director.saveLayers(requireAuth(req), workspaceId, projectId, validBody(req, layersSchema).layers) };
@@ -569,4 +675,63 @@ const firstFrameSchema = z.strictObject({ sceneId: uuid });
 musicVideoRouter.post('/:projectId/photos/:photoId/first-frame', validate({ params: photoParams, body: firstFrameSchema }), send(async (req, res) => {
   const { workspaceId, projectId, photoId } = p(res, photoParams);
   return { project: await photos.useAsFirstFrame(requireAuth(req), workspaceId, projectId, photoId, validBody(req, firstFrameSchema).sceneId) };
+}));
+
+/*
+ * Quick mix & master (1–3 consecutive scenes → a named, mastered teaser):
+ *   POST /:projectId/clips/preview          { sceneIds } price, length, suggested name, review warnings (free)
+ *   POST /:projectId/clips                  { sceneIds, name } start (token-gated)
+ *   GET  /:projectId/clips                  this video's clips, newest first
+ *   GET  /:projectId/clips/:clipId          one clip (progress while rendering)
+ *   GET  /:projectId/clips/:clipId/download a short-lived link that saves under the clip's name
+ */
+const clipParams = projectParams.extend({ clipId: uuid });
+const clipScenes = z.array(uuid).min(1, { error: 'Select at least one scene' }).max(quickClip.MAX_CLIP_SCENES, { error: `Select up to ${quickClip.MAX_CLIP_SCENES} scenes` });
+const clipPreviewSchema = z.strictObject({ sceneIds: clipScenes });
+const clipCreateSchema = z.strictObject({ sceneIds: clipScenes, name: text(100).min(2, { error: 'Give the clip a name' }) });
+musicVideoRouter.post('/:projectId/clips/preview', validate({ params: projectParams, body: clipPreviewSchema }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return quickClip.previewClip(requireAuth(req), workspaceId, projectId, validBody(req, clipPreviewSchema).sceneIds);
+}));
+musicVideoRouter.post('/:projectId/clips', validate({ params: projectParams, body: clipCreateSchema }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return quickClip.createClip(requireAuth(req), workspaceId, projectId, validBody(req, clipCreateSchema));
+}));
+musicVideoRouter.get('/:projectId/clips', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return quickClip.listClips(requireAuth(req), workspaceId, projectId);
+}));
+musicVideoRouter.get('/:projectId/clips/:clipId', validate({ params: clipParams }), send(async (req, res) => {
+  const { workspaceId, projectId, clipId } = p(res, clipParams);
+  return quickClip.getClip(requireAuth(req), workspaceId, projectId, clipId);
+}));
+musicVideoRouter.get('/:projectId/clips/:clipId/download', validate({ params: clipParams }), send(async (req, res) => {
+  const { workspaceId, projectId, clipId } = p(res, clipParams);
+  return quickClip.clipDownload(requireAuth(req), workspaceId, projectId, clipId);
+}));
+
+/*
+ * Scene tools:
+ *   POST /:projectId/scenes/:sceneId/duplicate  { withVideo, afterSceneId? } copy (paste after another scene with afterSceneId)
+ *   POST /:projectId/scenes/:sceneId/tweak      { instruction, lipSync, frameAt? } a new scene from a frame of this one's video
+ */
+/* Every generated video of the project (scene takes; optionally the master, quick clips, the cold-open film). Scenes stay. */
+const deleteVideosSchema = z.strictObject({ master: z.boolean().default(false), clips: z.boolean().default(false), coldOpen: z.boolean().default(false) });
+musicVideoRouter.post('/:projectId/videos/delete-all', validate({ params: projectParams, body: deleteVideosSchema }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return sceneTools.deleteAllVideos(requireAuth(req), workspaceId, projectId, validBody(req, deleteVideosSchema));
+}));
+const duplicateSchema = z.strictObject({ withVideo: z.boolean().default(true), afterSceneId: uuid.optional() });
+musicVideoRouter.post('/:projectId/scenes/:sceneId/duplicate', validate({ params: sceneParams, body: duplicateSchema }), send(async (req, res) => {
+  const { workspaceId, projectId, sceneId } = p(res, sceneParams);
+  return { project: await sceneTools.duplicateScene(requireAuth(req), workspaceId, projectId, sceneId, validBody(req, duplicateSchema)) };
+}));
+const tweakSchema = z.strictObject({
+  instruction: text(600).min(4, { error: 'Describe what should change (an expression, a motion…)' }),
+  lipSync: z.boolean().default(false),
+  frameAt: z.number().min(0).max(60).optional(),
+});
+musicVideoRouter.post('/:projectId/scenes/:sceneId/tweak', validate({ params: sceneParams, body: tweakSchema }), send(async (req, res) => {
+  const { workspaceId, projectId, sceneId } = p(res, sceneParams);
+  return { project: await sceneTools.tweakScene(requireAuth(req), workspaceId, projectId, sceneId, validBody(req, tweakSchema)) };
 }));

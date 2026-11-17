@@ -29,6 +29,8 @@ import { conformImage, downloadUrl, thumbnail } from '../studio/files.js';
 import { getStudioSettings, pickDuration } from '../studio/settings.js';
 import { json, sql, withSqlRetry } from '../studio/sql.js';
 import { logger } from '../utils/logger.js';
+import { getWatermarkSettings } from '../billing/watermarkRemoval.js';
+import { stampFile } from '../media/watermark.js';
 
 class Canceled extends Error {}
 
@@ -182,6 +184,8 @@ export async function runCreation(id: string): Promise<void> {
       charge += costs.video;
       await enter('STORING');
       const media = await probe(outputFile);
+      // Platform watermark (unless the super admin switched it off).
+      if (!row.options.brandFree && (await getWatermarkSettings()).enabled) outputFile = await stampFile(outputFile, join(workDir, 'output-marked.mp4'), 'video', { width: media.width || ASPECTS[row.aspect].width, height: media.height || ASPECTS[row.aspect].height });
       const thumb = join(workDir, 'thumb.jpg');
       await thumbnail(outputFile, thumb, Math.min(1, media.durationSec / 3));
       outputKey = keys.creation(row.userId, id, 'output.mp4');
@@ -193,6 +197,10 @@ export async function runCreation(id: string): Promise<void> {
       // Normalise whatever the model returned (webp/jpg/png) to a lossless PNG master.
       outputFile = join(workDir, 'output.png');
       await conformImageKeep(still!, outputFile);
+      if (!row.options.brandFree && (await getWatermarkSettings()).enabled) {
+        const image = await probe(outputFile).catch(() => null);
+        outputFile = await stampFile(outputFile, join(workDir, 'output-marked.png'), 'image', { width: image?.width || ASPECTS[row.aspect].width, height: image?.height || ASPECTS[row.aspect].height });
+      }
       outputKey = keys.creation(row.userId, id, 'output.png');
       await uploadFile(outputKey, outputFile, 'image/png');
     }

@@ -46,7 +46,9 @@ export const corsPolicy: RequestHandler = cors({
   allowedHeaders: ['Content-Type', 'Authorization', CSRF_HEADER],
   // ETag: multipart uploads through the relay read each part's ETag.
   exposedHeaders: ['RateLimit', 'RateLimit-Policy', 'Retry-After', 'ETag'],
-  maxAge: 600,
+  // Preflights are cached for 2 h (the most Chromium honours) so cross-origin
+  // callers (api.<domain>) pay one OPTIONS round trip, not one per request.
+  maxAge: 7200,
 });
 
 /**

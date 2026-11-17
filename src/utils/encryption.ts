@@ -14,7 +14,7 @@
  * `pnpm secrets:rotate` re-encrypts everything with the current key, after
  * which the older keys are no longer needed.
  */
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto';
 import { env } from '../config/env.js';
 import { logger } from './logger.js';
 
@@ -70,4 +70,14 @@ export function decryptSecretWithInfo(payload: string): { plaintext: string; rot
 
 export function decryptSecret(payload: string): string {
   return decryptSecretWithInfo(payload).plaintext;
+}
+
+/**
+ * A keyed one-way fingerprint (HMAC-SHA256) for values that must never be
+ * stored but must be matched, such as government ID numbers: the same input
+ * always gives the same fingerprint, and it cannot be reversed without the key.
+ * `purpose` separates domains so a fingerprint from one use never matches another.
+ */
+export function fingerprint(purpose: string, value: string): string {
+  return createHmac('sha256', CURRENT).update(`${purpose}\u0000${value}`).digest('hex');
 }

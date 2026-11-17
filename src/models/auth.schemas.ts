@@ -63,6 +63,18 @@ export const dateOfBirth = z
     return date;
   });
 
+/**
+ * What the user agreed to at sign-up (NDPR). Terms, privacy and age must be
+ * accepted; the rest are optional and default to off (never pre-ticked).
+ */
+export const signupConsents = z.strictObject({
+  terms: z.literal(true, { error: 'Accept the terms of service to continue' }),
+  privacy: z.literal(true, { error: 'Accept the privacy notice to continue' }),
+  age: z.literal(true, { error: 'Confirm you are 18 or older' }),
+  marketing: z.boolean().default(false),
+  productResearch: z.boolean().default(false),
+});
+
 export const registerSchema = z.strictObject({
   email,
   password: newPassword,
@@ -70,6 +82,7 @@ export const registerSchema = z.strictObject({
   role: z.enum(['CREATOR', 'PARTNER']).default('CREATOR'),
   gender,
   dateOfBirth,
+  consents: signupConsents,
 });
 
 export const loginSchema = z.strictObject({

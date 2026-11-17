@@ -37,6 +37,7 @@ import { downloadUrl, thumbnail } from './files.js';
 import { getStudioSettings } from './settings.js';
 import { json, sql, withSqlRetry } from './sql.js';
 import { publishProgress } from '../realtime/events.js';
+import { projectWatermarked, WATERMARK_FILE, watermarkAvailable, watermarkFilters } from '../media/watermark.js';
 import { DEFAULT_FINISH, masterAudioFilters, type AssetRow, type Finish, type ProjectRow, type SceneRow } from './types.js';
 
 class Canceled extends Error {}
@@ -543,7 +544,8 @@ export async function runAssembly(projectId: string): Promise<void> {
       ...(titleFilter ? [titleFilter] : []),
       'format=yuv420p',
     ];
-    graph.push(`${last}${finishing.join(',')}[vout]`);
+    // Graded picture; the watermark (if any) is laid on just before the encode, once every input is known.
+    graph.push(`${last}${finishing.join(',')}[graded]`);
 
     // Commercials: each scene's spoken line (VOICE asset) starts with its scene (a beat after the cut).
     const voiceTracks: { file: string; at: number }[] = [];
@@ -635,6 +637,17 @@ export async function runAssembly(projectId: string): Promise<void> {
       }
     }
 
+    // Platform watermark: on every render until the project owner pays it off.
+    if ((await projectWatermarked(projectId)) && (await watermarkAvailable())) {
+      const logoIndex = segments.length + audioArgs.filter((arg) => arg === '-i').length;
+      audioArgs.push('-loop', '1', '-i', WATERMARK_FILE);
+      const mark = watermarkFilters('[graded]', logoIndex, { width, height }, 'vout');
+      graph.push(...mark.graph);
+      log.push({ at: new Date().toISOString(), stage, engine: 'watermark', ms: 0, detail: 'platform watermark added (remove it for this project from the project page)' });
+    } else {
+      graph.push('[graded]null[vout]');
+    }
+
     const output = join(workDir, 'film.mp4');
     const thumb = join(workDir, 'film.jpg');
     await timed(
@@ -714,6 +727,36 @@ export async function runAssembly(projectId: string): Promise<void> {
         );
         final = joined;
         opening = seconds;
+      }
+    }
+
+    // Music videos: VeloBot's cold open (a short narrated film) plays first, before any titles and the song.
+    if (project.kind === 'MUSIC_VIDEO') {
+      const { readyPrologue } = await import('../musicvideo/prologue.js');
+      const cold = await readyPrologue(projectId).catch(() => null);
+      if (cold) {
+        const coldFile = join(workDir, 'cold-open.mp4');
+        await downloadToFile(cold.key, coldFile);
+        const withCold = join(workDir, 'film-cold-open.mp4');
+        await timed(
+          'ffmpeg cold open',
+          () =>
+            ffmpeg([
+              '-i', coldFile,
+              '-i', final,
+              '-filter_complex',
+              `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},fps=${FPS},setsar=1,format=yuv420p[cv];` +
+                '[0:a]aresample=48000,aformat=channel_layouts=stereo[ca];' +
+                `[1:v]fps=${FPS},setsar=1,format=yuv420p[fv];[1:a]aresample=48000,aformat=channel_layouts=stereo[fa];` +
+                '[cv][ca][fv][fa]concat=n=2:v=1:a=1[v][a]',
+              '-map', '[v]', '-map', '[a]', '-r', String(FPS),
+              '-c:v', 'libx264', '-preset', 'slow', '-crf', '16', '-profile:v', 'high', '-pix_fmt', 'yuv420p',
+              '-c:a', 'aac', '-b:a', '320k', '-movflags', '+faststart', withCold,
+            ]),
+          `${cold.seconds.toFixed(1)} s cold open`,
+        );
+        final = withCold;
+        opening += cold.seconds;
       }
     }
 

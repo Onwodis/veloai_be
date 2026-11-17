@@ -52,12 +52,71 @@ export interface Layer {
   muted?: boolean;
 }
 
-/** An imported audio track under the song (named by the artist; level + mute for the whole track). */
+/**
+ * A channel strip's effects (Cubase MixConsole style). Every field is
+ * optional: missing = off / unity, so older projects render exactly as before.
+ */
+export interface TrackFx {
+  /** Balance: -1 hard left · 0 centre · 1 hard right. */
+  pan?: number;
+  /** Stereo width: 0 mono · 1 as recorded · 2 extra wide (mid / side). */
+  width?: number;
+  /** EQ, dB (-12…+12): low shelf at 100 Hz, a bell at midHz (default 1 kHz), high shelf at 8 kHz. */
+  lowDb?: number;
+  midDb?: number;
+  midHz?: number;
+  highDb?: number;
+  /** Low cut (high-pass) and high cut (low-pass), Hz; 0 / missing = off. */
+  highpassHz?: number;
+  lowpassHz?: number;
+  /** Noise removal strength 0…1 (0 = off): an FFT denoiser that tracks the noise floor as it plays. */
+  denoise?: number;
+}
+
+const clampNum = (value: number | undefined, min: number, max: number, fallback: number): number =>
+  typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
+
+/**
+ * The strip as ffmpeg audio filters, in signal order (clean-up first, then
+ * tone, then the stereo image): denoise → low / high cut → EQ → width → pan.
+ * Empty when the strip leaves the sound untouched.
+ */
+export function fxFilters(fx: TrackFx | null | undefined): string[] {
+  if (!fx) return [];
+  const out: string[] = [];
+  const denoise = clampNum(fx.denoise, 0, 1, 0);
+  // nr: dB of noise taken away (6…36); nf: the assumed floor; tn: follow the floor as the song changes.
+  if (denoise > 0.01) out.push(`afftdn=nr=${(6 + denoise * 30).toFixed(1)}:nf=-${(50 - denoise * 15).toFixed(0)}:tn=1`);
+  const highpass = clampNum(fx.highpassHz, 0, 2000, 0);
+  if (highpass >= 20) out.push(`highpass=f=${highpass.toFixed(0)}:poles=2`);
+  const lowpass = clampNum(fx.lowpassHz, 0, 20000, 0);
+  if (lowpass >= 500 && lowpass < 19500) out.push(`lowpass=f=${lowpass.toFixed(0)}:poles=2`);
+  const low = clampNum(fx.lowDb, -12, 12, 0);
+  if (Math.abs(low) >= 0.1) out.push(`bass=g=${low.toFixed(1)}:f=100:t=q:w=0.7`);
+  const mid = clampNum(fx.midDb, -12, 12, 0);
+  if (Math.abs(mid) >= 0.1) out.push(`equalizer=f=${clampNum(fx.midHz, 200, 6000, 1000).toFixed(0)}:t=q:w=1:g=${mid.toFixed(1)}`);
+  const high = clampNum(fx.highDb, -12, 12, 0);
+  if (Math.abs(high) >= 0.1) out.push(`treble=g=${high.toFixed(1)}:f=8000:t=q:w=0.7`);
+  const width = clampNum(fx.width, 0, 2, 1);
+  // Mid / side: L' = L·(1+w)/2 + R·(1−w)/2 (w = 0 folds to mono, w = 2 doubles the side).
+  if (Math.abs(width - 1) >= 0.01) {
+    const a = ((1 + width) / 2).toFixed(4);
+    const b = ((1 - width) / 2).toFixed(4);
+    out.push(`pan=stereo|c0=${a}*c0+${b}*c1|c1=${b}*c0+${a}*c1`);
+  }
+  const pan = clampNum(fx.pan, -1, 1, 0);
+  // Balance: turning right lowers the left side, and vice versa (the near side stays at unity).
+  if (Math.abs(pan) >= 0.01) out.push(`pan=stereo|c0=${Math.min(1, 1 - pan).toFixed(4)}*c0|c1=${Math.min(1, 1 + pan).toFixed(4)}*c1`);
+  return out;
+}
+
+/** An imported audio track under the song (named by the artist; level, mute and its channel strip). */
 export interface AudioTrack {
   id: string;
   name: string;
   gainDb: number;
   muted?: boolean;
+  fx?: TrackFx;
 }
 
 /**
@@ -93,6 +152,10 @@ export interface AudioEdits {
   clips?: Clip[];
   /** Imported audio tracks (their events are the layers with `track` set). */
   tracks?: AudioTrack[];
+  /** The song's channel strip (the whole music track, before the layers join). */
+  musicFx?: TrackFx;
+  /** The overlay lane's strip (layers that sit on no imported track). */
+  overlayFx?: TrackFx;
 }
 
 interface Piece {
@@ -288,7 +351,12 @@ async function finishMix(dir: string, inputs: string[], graph: string[], edits: 
     const trackOf = new Map((edits.tracks ?? []).map((track) => [track.id, track]));
     const layers = edits.layers
       .filter((layer) => layerKeys.has(layer.assetId) && layer.at < total && !layer.muted && !(layer.track && trackOf.get(layer.track)?.muted))
-      .map((layer) => ({ ...layer, gainDb: layer.gainDb + (layer.track ? (trackOf.get(layer.track)?.gainDb ?? 0) : 0) }));
+      .map((layer) => ({
+        ...layer,
+        gainDb: layer.gainDb + (layer.track ? (trackOf.get(layer.track)?.gainDb ?? 0) : 0),
+        // Each event goes through its track's strip (or the overlay lane's).
+        fx: fxFilters(layer.track && trackOf.has(layer.track) ? trackOf.get(layer.track)!.fx : edits.overlayFx),
+      }));
     for (const [index, layer] of layers.entries()) {
       const file = join(dir, `layer-${index}`);
       await downloadToFile(layerKeys.get(layer.assetId)!, file);
@@ -296,13 +364,17 @@ async function finishMix(dir: string, inputs: string[], graph: string[], edits: 
       const trim = layer.trimEnd > layer.trimStart ? `atrim=${layer.trimStart.toFixed(3)}:${layer.trimEnd.toFixed(3)},` : `atrim=start=${layer.trimStart.toFixed(3)},`;
       const delayMs = Math.round(layer.at * 1000);
       graph.push(
-        `[${index + 1}:a]aresample=48000,aformat=channel_layouts=stereo,${trim}asetpts=PTS-STARTPTS,volume=${Math.min(12, Math.max(-60, layer.gainDb)).toFixed(1)}dB` +
+        `[${index + 1}:a]aresample=48000,aformat=channel_layouts=stereo,${trim}asetpts=PTS-STARTPTS,volume=${Math.min(12, Math.max(-60, layer.gainDb)).toFixed(1)}dB${layer.fx.length ? `,${layer.fx.join(',')}` : ''}` +
           `${layer.fadeIn > 0 ? `,afade=t=in:d=${layer.fadeIn.toFixed(2)}` : ''}${layer.fadeOut > 0 ? `,areverse,afade=t=in:d=${layer.fadeOut.toFixed(2)},areverse` : ''},adelay=${delayMs}|${delayMs}[l${index}]`,
       );
     }
     const output = join(dir, 'mix.m4a');
-    if (layers.length) graph.push(`[song]${layers.map((_, index) => `[l${index}]`).join('')}amix=inputs=${layers.length + 1}:duration=first:normalize=0:dropout_transition=0[out]`);
-    else graph.push('[song]anull[out]');
+    // The song's own strip, before the layers join it.
+    const songFx = fxFilters(edits.musicFx);
+    if (songFx.length) graph.push(`[song]${songFx.join(',')}[songfx]`);
+    const songLabel = songFx.length ? '[songfx]' : '[song]';
+    if (layers.length) graph.push(`${songLabel}${layers.map((_, index) => `[l${index}]`).join('')}amix=inputs=${layers.length + 1}:duration=first:normalize=0:dropout_transition=0[out]`);
+    else graph.push(`${songLabel}anull[out]`);
     await ffmpeg([...inputs, '-filter_complex', graph.join(';'), '-map', '[out]', '-t', total.toFixed(3), '-c:a', 'aac', '-b:a', '320k', '-ar', '48000', output]);
     await uploadFile(destKey, output, 'audio/mp4');
     return total;
@@ -315,6 +387,8 @@ export interface Lyrics {
   language: string | null;
   /** Detected by the director (languages mixed in, pidgin). */
   languages?: { primary: string; others: string[]; pidgin: boolean; note: string } | null;
+  /** The singing voice as a background cue (accent + the region the song speaks to), from the words. */
+  voice?: { accent: string; region: string; confidence: 'low' | 'medium' | 'high'; note: string } | null;
   engine: string;
 }
 

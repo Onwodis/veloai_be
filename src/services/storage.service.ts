@@ -23,6 +23,7 @@ import {
   AbortMultipartUploadCommand,
   type CORSRule,
   CompleteMultipartUploadCommand,
+  CopyObjectCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
@@ -246,6 +247,46 @@ export async function getObjectStream(key: string): Promise<{ body: Readable; co
     if ((error as { name?: string }).name === 'NoSuchKey') return null;
     throw error;
   }
+}
+
+/**
+ * A byte range of an object (or all of it), for streaming video through the API
+ * (public view links: the browser seeks with Range requests; the storage URL is never shown).
+ */
+export async function getObjectRange(
+  key: string,
+  range?: string,
+): Promise<{ body: Readable; contentType: string | undefined; length: number | undefined; contentRange: string | undefined; total: number | undefined } | null> {
+  try {
+    const object = await s3().send(new GetObjectCommand({ Bucket: bucket(), Key: key, ...(range ? { Range: range } : {}) }));
+    const total = object.ContentRange ? Number(object.ContentRange.split('/')[1]) : object.ContentLength;
+    return { body: object.Body as Readable, contentType: object.ContentType, length: object.ContentLength, contentRange: object.ContentRange, total };
+  } catch (error) {
+    const name = (error as { name?: string }).name;
+    if (name === 'NoSuchKey') return null;
+    if (name === 'InvalidRange') throw Object.assign(new Error('Range not satisfiable'), { status: 416 });
+    throw error;
+  }
+}
+
+/**
+ * A short-lived signed URL, ALWAYS signed (never the public bucket URL): for
+ * private files such as identity documents. Expires in `seconds` (default 5 min).
+ * With `downloadName` the browser saves it under that name instead of showing it.
+ */
+export async function privateReadUrl(key: string, seconds = 300, downloadName?: string): Promise<string> {
+  const disposition = downloadName ? `attachment; filename="${downloadName.replace(/[^\w .-]+/g, '_')}"` : 'inline';
+  return getSignedUrl(s3(), new GetObjectCommand({ Bucket: bucket(), Key: key, ResponseContentDisposition: disposition }), { expiresIn: seconds });
+}
+
+/**
+ * Copies an object inside the bucket (server side, no download): used when a
+ * scene is duplicated with its video, so each copy owns its own files.
+ */
+export async function copyObject(from: string, to: string): Promise<void> {
+  await s3().send(new CopyObjectCommand({ Bucket: bucket(), CopySource: `${bucket()}/${encodeURIComponent(from).replace(/%2F/g, '/')}`, Key: to }));
+  const head = await headObject(to);
+  if (head) await track(to, head.size);
 }
 
 /** URL a browser can play/download. Public bucket URL when configured, else a signed GET. */

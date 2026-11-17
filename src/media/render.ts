@@ -22,6 +22,7 @@ import { planEdit, type ReelPlan } from './edit.js';
 import { ffmpeg } from './ffmpeg.js';
 import type { EffectKind, ScriptEdit } from './script.js';
 import type { Word } from './transcribe.js';
+import { WATERMARK_FILE, watermarkAvailable, watermarkFilters } from './watermark.js';
 
 export type Framing = 'original' | 'fit' | 'crop';
 
@@ -61,6 +62,8 @@ export interface RenderInput {
   title?: { text: string; seconds: number } | undefined;
   onProgress?: (fraction: number) => void;
   signal?: AbortSignal;
+  /** Lay the platform watermark over the reel (media/watermark.ts). */
+  watermark?: boolean;
 }
 
 const even = (value: number): number => Math.max(2, Math.round(value / 2) * 2);
@@ -217,7 +220,11 @@ export async function renderReel(input: RenderInput): Promise<{ video: string; t
   const fadeIn = Math.min(0.3, duration / 10);
   const fadeOut = Math.min(0.45, duration / 8);
   const fades = `fade=t=in:st=0:d=${fadeIn.toFixed(2)},fade=t=out:st=${Math.max(0, duration - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(2)}`;
-  graph.push(...effectGraph(edits, 'graded', 'fx', canvas), `[fx]${subs},${fades},format=yuv420p[v]`);
+  graph.push(...effectGraph(edits, 'graded', 'fx', canvas), `[fx]${subs},${fades},format=yuv420p[vfinal]`);
+  // Platform watermark (input 1, after the source), unless switched off.
+  const marked = Boolean(input.watermark) && (await watermarkAvailable());
+  if (marked) graph.push(...watermarkFilters('[vfinal]', 1, canvas, 'v').graph);
+  else graph.push('[vfinal]null[v]');
 
   /* AUDIO ----------------------------------------------------------------- */
   if (withAudio) {
@@ -239,6 +246,7 @@ export async function renderReel(input: RenderInput): Promise<{ video: string; t
       '-ss', String(input.start),
       '-t', String(clipLength),
       '-i', input.source,
+      ...(marked ? ['-loop', '1', '-i', WATERMARK_FILE] : []),
       '-filter_complex', graph.join(';'),
       '-map', '[v]',
       ...(withAudio ? ['-map', '[aout]', '-c:a', 'aac', '-b:a', '192k'] : ['-an']),

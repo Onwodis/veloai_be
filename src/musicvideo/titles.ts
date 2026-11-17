@@ -79,12 +79,12 @@ const stamp = (seconds: number): string => {
 };
 const escape = (value: string): string => value.replace(/\\/g, '\\\\').replace(/\{/g, '\\{').replace(/\}/g, '\\}').replace(/\r?\n/g, '\\N');
 
-interface Frame {
+export interface Frame {
   width: number;
   height: number;
 }
 
-function header(frame: Frame, style: TitleStyle): string[] {
+export function header(frame: Frame, style: TitleStyle): string[] {
   const font = FONT[style];
   const unit = Math.min(frame.width, frame.height);
   const small = Math.round(unit / 30);
@@ -117,7 +117,7 @@ function header(frame: Frame, style: TitleStyle): string[] {
 const upper = (value: string, style: TitleStyle): string => (style === 'minimal' ? value.toLowerCase() : value.toUpperCase());
 
 /** Words appear one after another (typewriter-like), then the card fades out. */
-function revealWords(text: string, start: number, seconds: number): string {
+export function revealWords(text: string, start: number, seconds: number): string {
   const words = text.split(/\s+/).filter(Boolean);
   const window = Math.max(0.6, Math.min(seconds * 0.55, words.length * 0.28));
   const per = (window * 1000) / Math.max(1, words.length);

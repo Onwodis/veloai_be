@@ -4,3 +4,7 @@ dist/
 *.log
 .neon
 .redis-data/
+
+# Every environment file except the example (secrets never go to git).
+.env.*
+!.env.example

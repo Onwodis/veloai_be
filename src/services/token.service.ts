@@ -59,9 +59,11 @@ async function ensureWallet(db: Tx | typeof prisma, workspaceId: string): Promis
 }
 
 export async function getWallet(workspaceId: string): Promise<WalletView> {
+  // Read once; only a workspace without a wallet yet (first visit) pays for creating it.
+  const wallet = await prisma.tokenWallet.findUnique({ where: { workspaceId } });
+  if (wallet) return view(wallet);
   await ensureWallet(prisma, workspaceId);
-  const wallet = await prisma.tokenWallet.findUniqueOrThrow({ where: { workspaceId } });
-  return view(wallet);
+  return view(await prisma.tokenWallet.findUniqueOrThrow({ where: { workspaceId } }));
 }
 
 /**
@@ -75,8 +77,15 @@ export async function isUnmetered(auth: Pick<AuthContext, 'role'>): Promise<bool
 
 /** Balance for any workspace member; super admins are unmetered unless set to METERED. */
 export async function walletFor(auth: AuthContext, workspaceId: string): Promise<{ wallet: WalletView; unmetered: boolean }> {
-  if (auth.role !== 'SUPER_ADMIN') await requireMembership(auth.userId, workspaceId);
-  return { wallet: await getWallet(workspaceId), unmetered: await isUnmetered(auth) };
+  // The membership check, the wallet read and the mode run together (one round trip). A
+  // missing wallet is only created once membership is confirmed, so a non-member's request
+  // never creates (or grants welcome tokens to) someone else's wallet.
+  const [, existing, unmetered] = await Promise.all([
+    auth.role === 'SUPER_ADMIN' ? Promise.resolve(null) : requireMembership(auth.userId, workspaceId),
+    prisma.tokenWallet.findUnique({ where: { workspaceId } }),
+    isUnmetered(auth),
+  ]);
+  return { wallet: existing ? view(existing) : await getWallet(workspaceId), unmetered };
 }
 
 /** Credits or debits the balance and writes the ledger row, atomically. */

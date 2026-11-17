@@ -26,7 +26,7 @@ function studioQueue(): Queue {
   return queue;
 }
 
-async function add(name: 'take' | 'assemble' | 'likeness' | 'creation', id: string): Promise<void> {
+async function add(name: 'take' | 'assemble' | 'likeness' | 'creation' | 'clip' | 'portraits' | 'tutorial', id: string): Promise<void> {
   const jobId = `${name}-${id}`;
   const existing = await studioQueue().getJob(jobId);
   if (existing) {
@@ -39,6 +39,12 @@ async function add(name: 'take' | 'assemble' | 'likeness' | 'creation', id: stri
 
 export const enqueueTake = (takeId: string): Promise<void> => add('take', takeId);
 export const enqueueAssembly = (projectId: string): Promise<void> => add('assemble', projectId);
+/** Quick mix & master teaser of a music video (musicvideo/quickClip.ts). */
+export const enqueueClip = (clipId: string): Promise<void> => add('clip', clipId);
+/** A user's professional portraits (billing/portraits.ts). */
+export const enqueuePortraits = (userId: string): Promise<void> => add('portraits', userId);
+/** A marketing tutorial video (marketing/service.ts). */
+export const enqueueTutorial = (assetId: string): Promise<void> => add('tutorial', assetId);
 /** Build a user's likeness (frames, voice, analysis, identity training). */
 export const enqueueLikeness = (userId: string): Promise<void> => add('likeness', userId);
 /** One @me / prompt / enhancement creation. */
@@ -64,6 +70,9 @@ export async function startStudioWorker(): Promise<void> {
       // Imported lazily: these modules import this queue to enqueue work.
       else if (job.name === 'likeness') await (await import('../likeness/job.js')).runLikeness(id);
       else if (job.name === 'creation') await (await import('../creations/job.js')).runCreation(id);
+      else if (job.name === 'clip') await (await import('../musicvideo/quickClip.js')).runQuickClip(id);
+      else if (job.name === 'portraits') await (await import('../billing/portraits.js')).runPortraits(id);
+      else if (job.name === 'tutorial') await (await import('../marketing/service.js')).runTutorial(id);
     },
     // Generations poll fal.ai for many minutes; the lock is renewed automatically while the job runs.
     { connection: connection(), concurrency, lockDuration: 10 * 60_000 },
@@ -96,7 +105,16 @@ export async function recoverStudio(): Promise<number> {
   const creations = await sql<{ id: string }[]>`SELECT id FROM creations WHERE status IN ('QUEUED', 'DIRECTING', 'IMAGING', 'ANIMATING', 'ENHANCING', 'STORING')`.catch(() => []);
   for (const row of likeness) await enqueueLikeness(row.userId);
   for (const row of creations) await enqueueCreation(row.id);
-  return takes.length + projects.length + likeness.length + creations.length;
+  // Quick clips are ffmpeg only (no paid engine calls), so an interrupted one simply starts again.
+  const clips = await sql<{ id: string }[]>`SELECT id FROM mv_clips WHERE status IN ('QUEUED', 'RENDERING')`.catch(() => []);
+  for (const row of clips) {
+    // Still being rendered by a live worker (another instance): leave it alone.
+    const job = await studioQueue().getJob(`clip-${row.id}`);
+    if (job && (await job.getState()) === 'active') continue;
+    await sql`UPDATE mv_clips SET status = 'QUEUED', stage = NULL, progress = 0, detail = 'Waiting for the mastering room' WHERE id = ${row.id}`;
+    await enqueueClip(row.id);
+  }
+  return takes.length + projects.length + likeness.length + creations.length + clips.length;
 }
 
 /** True while a worker is actually cutting this project. */

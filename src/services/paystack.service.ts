@@ -31,6 +31,7 @@ import { logger } from '../utils/logger.js';
 import { getTokenSettings } from './settings.service.js';
 import { applyEntry } from './token.service.js';
 import { requireMembership } from './workspace.service.js';
+import { requireKyc } from '../privacy/kyc.js';
 
 const API = 'https://api.paystack.co';
 
@@ -115,7 +116,10 @@ export function lastKeyChecks(): Partial<Record<PaymentMode, PaystackKeyCheck>> 
 /* ------------------------------------------------------------------ checkout */
 
 export async function startCheckout(auth: AuthContext, workspaceId: string, packageId: string): Promise<{ authorizationUrl: string; reference: string; mode: PaymentMode }> {
-  if (auth.role !== 'SUPER_ADMIN') await requireMembership(auth.userId, workspaceId, ['OWNER']);
+  if (auth.role !== 'SUPER_ADMIN') {
+    await requireMembership(auth.userId, workspaceId, ['OWNER']);
+    await requireKyc(auth.userId, 'purchase');
+  }
   const settings = await getTokenSettings();
   const pkg = settings.packages.find((item) => item.id === packageId);
   if (!pkg) throw AppError.badRequest('That token package is no longer available');

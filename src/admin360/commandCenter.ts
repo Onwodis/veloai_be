@@ -10,7 +10,7 @@
  *              takes ready / failed, estimated provider cost vs value charged
  *   lists      newest users, top spenders, latest payments, latest failures
  */
-import { getTokenSettings } from '../services/settings.service.js';
+import { getPricing, getTokenSettings } from '../services/settings.service.js';
 import { getEconomicsSettings } from '../studio/economics.js';
 import { sql } from '../studio/sql.js';
 
@@ -34,7 +34,7 @@ function fill(rows: DayValue[], from: Date, days: number): Map<string, number> {
 export async function commandCenter(rangeDays: number) {
   const today = new Date();
   const from = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (rangeDays - 1)));
-  const [tokens, economics] = await Promise.all([getTokenSettings(), getEconomicsSettings()]);
+  const [tokens, economics, pricing] = await Promise.all([getTokenSettings(), getEconomicsSettings(), getPricing()]);
   const reference = tokens.packages.find((pkg) => pkg.highlighted) ?? tokens.packages[0]!;
   const pricePerToken = reference.price / reference.tokens;
   // Provider cost per READY take-second, using the video + lip-sync rates (keyframes are small).
@@ -57,6 +57,9 @@ export async function commandCenter(rangeDays: number) {
     spenders,
     payments,
     failures,
+    [storage],
+    storageDays,
+    storageTop,
   ] = await Promise.all([
     sql<{ total: number; newInRange: number; active24h: number; active7d: number; suspended: number; twoFactor: number }[]>`
       SELECT (SELECT count(*)::int FROM users) AS total,
@@ -109,6 +112,18 @@ export async function commandCenter(rangeDays: number) {
       SELECT t.id, 'take' AS kind, p.title, t.error, p.created_by_id AS user_id, u.email, COALESCE(t.finished_at, t.created_at) AS at
       FROM studio_takes t JOIN studio_projects p ON p.id = t.project_id LEFT JOIN users u ON u.id = p.created_by_id
       WHERE t.status = 'FAILED' ORDER BY t.created_at DESC LIMIT 8`,
+    // Platform storage (every file we hold in R2, as recorded in the storage ledger).
+    sql<{ bytes: number; objects: number; uploads: number; generated: number; users: number; addedInRange: number }[]>`
+      SELECT COALESCE(sum(bytes), 0)::float AS bytes, count(*)::int AS objects,
+        COALESCE(sum(bytes) FILTER (WHERE kind = 'UPLOAD'), 0)::float AS uploads,
+        COALESCE(sum(bytes) FILTER (WHERE kind = 'GENERATED'), 0)::float AS generated,
+        count(DISTINCT user_id)::int AS users,
+        COALESCE(sum(bytes) FILTER (WHERE created_at >= ${from}), 0)::float AS added_in_range
+      FROM storage_objects`,
+    sql<DayValue[]>`SELECT ${day('created_at')} AS day, (sum(bytes) / 1048576.0)::float AS value FROM storage_objects WHERE created_at >= ${from} GROUP BY 1`,
+    sql<{ userId: string; email: string; displayName: string; bytes: number }[]>`
+      SELECT u.id AS user_id, u.email, u.display_name, sum(o.bytes)::float AS bytes
+      FROM storage_objects o JOIN users u ON u.id = o.user_id GROUP BY u.id, u.email, u.display_name ORDER BY bytes DESC LIMIT 6`,
   ]);
 
   const days = (map: Map<string, number>) => [...map.keys()];
@@ -151,5 +166,16 @@ export async function commandCenter(rangeDays: number) {
     spenders,
     payments: payments.map((row) => ({ ...row, at: row.at.toISOString() })),
     failures: failures.map((row) => ({ ...row, at: row.at.toISOString() })),
+    storage: {
+      ...storage!,
+      // What holding it costs per month (minor units), at the console's storage rate.
+      monthlyCost: Math.round((storage!.bytes / 1024 ** 3) * pricing.storagePerGbMonth),
+      // Megabytes added per day (files still held), for the growth chart.
+      growth: (() => {
+        const map = fill(storageDays, from, rangeDays);
+        return [...map.entries()].map(([dayKey, value]) => ({ day: dayKey, megabytes: Math.round(value * 10) / 10 }));
+      })(),
+      top: storageTop,
+    },
   };
 }

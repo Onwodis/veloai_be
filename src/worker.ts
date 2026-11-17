@@ -3,6 +3,8 @@
  * the API in production and set MEDIA_WORKER_INLINE=false on the API.
  * Processes both queues: reels and the AI video studio.
  */
+// Must run before any socket opens (slow-link connect timeouts).
+import './config/network.js';
 import { connectDatabase, disconnectDatabase } from './config/database.js';
 import { recoverStuckProjects, startWorker, stopMedia } from './media/queue.js';
 import { recoverStudio, startStudioWorker, stopStudio } from './studio/queue.js';

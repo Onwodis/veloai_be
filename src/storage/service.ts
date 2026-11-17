@@ -22,6 +22,7 @@ import { json, sql, type Tx } from '../studio/sql.js';
 import { AppError } from '../utils/AppError.js';
 import { randomToken } from '../utils/crypto.js';
 import { logger } from '../utils/logger.js';
+import { requireKyc } from '../privacy/kyc.js';
 import { withUser } from './rls.js';
 
 const MB = 1024 * 1024;
@@ -118,14 +119,18 @@ export interface StorageStatus {
 }
 
 async function statusWith(tx: Tx, userId: string, unlimited: boolean): Promise<StorageStatus> {
-  const settings = await getStorageSettings();
-  const { currency } = await getTokenSettings();
-  const [account] = await tx<{ usedBytes: string; files: number; quotaOverrideBytes: string | null; overQuotaSince: Date | null }[]>`
-    SELECT used_bytes, files, quota_override_bytes, over_quota_since FROM storage_accounts WHERE user_id = ${userId}`;
-  const [{ quota } = { quota: '0' }] = await tx<{ quota: string }[]>`SELECT storage_quota(${userId}::uuid)::text AS quota`;
-  const packs = await tx<{ packId: string; bytes: string; amount: number; periodEnd: Date }[]>`
-    SELECT pack_id, bytes, amount, period_end FROM storage_purchases
-    WHERE user_id = ${userId} AND status = 'PAID' AND period_start <= now() AND period_end > now() ORDER BY period_end`;
+  // All at once: the settings are cached, and the three queries pipeline on the
+  // transaction's connection (one round trip instead of three).
+  const [settings, { currency }, [account], [{ quota } = { quota: '0' }], packs] = await Promise.all([
+    getStorageSettings(),
+    getTokenSettings(),
+    tx<{ usedBytes: string; files: number; quotaOverrideBytes: string | null; overQuotaSince: Date | null }[]>`
+      SELECT used_bytes, files, quota_override_bytes, over_quota_since FROM storage_accounts WHERE user_id = ${userId}`,
+    tx<{ quota: string }[]>`SELECT storage_quota(${userId}::uuid)::text AS quota`,
+    tx<{ packId: string; bytes: string; amount: number; periodEnd: Date }[]>`
+      SELECT pack_id, bytes, amount, period_end FROM storage_purchases
+      WHERE user_id = ${userId} AND status = 'PAID' AND period_start <= now() AND period_end > now() ORDER BY period_end`,
+  ]);
   const used = Number(account?.usedBytes ?? 0);
   const quotaBytes = Number(quota);
   const base = account?.quotaOverrideBytes ? Number(account.quotaOverrideBytes) : settings.defaultQuotaMb * MB;
@@ -236,6 +241,7 @@ export async function storageFiles(auth: AuthContext, page: number, pageSize: nu
 /* ------------------------------------------------------------------ paid storage */
 
 export async function startStorageCheckout(auth: AuthContext, packId: string) {
+  if (auth.role !== 'SUPER_ADMIN') await requireKyc(auth.userId, 'purchase');
   const settings = await getStorageSettings();
   const pack = settings.packs.find((item) => item.id === packId);
   if (!pack) throw AppError.badRequest('That storage pack is no longer offered.');

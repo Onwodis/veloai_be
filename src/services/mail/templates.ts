@@ -111,3 +111,30 @@ export function testMail(credentialLabel: string): RenderedMail {
     text: intro,
   };
 }
+
+export function kycDecisionMail(params: { approved: boolean; level: number; reason?: string; url: string }): RenderedMail {
+  const what = params.level === 3 ? 'business' : 'identity';
+  const heading = params.approved ? `Your ${what} is verified` : `We could not verify your ${what} yet`;
+  const intro = params.approved
+    ? `Thanks for verifying. Your ${env.APP_NAME} account is now at verification level ${params.level}, and everything that needs it is open to you.`
+    : `We reviewed your documents and need you to fix something before we can verify you: ${params.reason ?? 'the documents could not be read'}. Upload them again from Verification in your dashboard.`;
+  const outro = 'Your documents are private: only the reviewer sees them, through links that expire in minutes. ID numbers are never stored.';
+  return {
+    template: params.approved ? 'kyc_approved' : 'kyc_rejected',
+    subject: `${env.APP_NAME}: ${heading.toLowerCase()}`,
+    html: layout({ heading, intro, cta: { label: params.approved ? 'Open your dashboard' : 'Upload again', url: params.url }, outro }),
+    text: `${intro}\n\n${params.url}\n\n${outro}`,
+  };
+}
+
+export function dataRequestClosedMail(params: { type: string; status: 'DONE' | 'REJECTED'; response: string; url: string }): RenderedMail {
+  const heading = params.status === 'DONE' ? 'Your data request is complete' : 'About your data request';
+  const intro = `Your ${params.type.toLowerCase()} request has been answered: ${params.response}`;
+  const outro = 'If you are not satisfied with this answer, you can complain to the Nigeria Data Protection Commission (NDPC).';
+  return {
+    template: 'data_request_closed',
+    subject: `${env.APP_NAME}: ${heading.toLowerCase()}`,
+    html: layout({ heading, intro, cta: { label: 'See Privacy & data', url: params.url }, outro }),
+    text: `${intro}\n\n${params.url}\n\n${outro}`,
+  };
+}

@@ -162,6 +162,8 @@ export interface PromptInput {
   aspect: Aspect;
   /** Music videos: the song under this shot, so movement and camera ride the beat. */
   rhythm?: { bpm: number | null; section: string; energy: number } | undefined;
+  /** Music videos: cast background + shoot location ("Lagos, Nigeria; a natural mix of Black and white people"). */
+  place?: string | undefined;
   /** Creative mode: sharp, bold camera work. */
   creative?: boolean | undefined;
   /** Music video: real-world music-video performance standard. */
@@ -213,7 +215,8 @@ export const LIP_SYNC =
   'Real singing performance shot for lip sync: the face is large in frame (head and shoulders fill at least a third of the frame height), well lit, turned toward the camera ' +
   '(never more than a three-quarter view), mouth fully visible and unobstructed (no microphone, hand, hair or object in front of the lips). ' +
   'The whole face is alive the way a singer’s face is: brows lift and pinch with the phrasing, forehead lines and eye creases form and release, cheeks lift, nostrils flare on the breaths, the throat moves. ' +
-  'The mouth sings naturally: the jaw drops open on long vowels with teeth and tongue visible, lips press together and release, corners stretch wide on bright vowels, never shouted or exaggerated. ' +
+  'The mouth opens only as much as the voice in the song does: relaxed and small on conversational or soft lines, wider only on belted, held notes; between phrases it rests or closes. ' +
+  'Never a constantly open or gaping mouth, never shapes held for the camera; the tension of the voice (strained, tender, cool, joyful) shows in the jaw, lips and eyes the way it would on a real singer. ' +
   'Head and shoulders move with the phrasing.';
 
 /**
@@ -242,13 +245,55 @@ export function softDelivery(input: { lyric?: string | undefined; rhythm?: Promp
   return false;
 }
 
-function rhythmLine(rhythm: PromptInput['rhythm']): string {
+const DANCE = /\b(danc\w*|choreograph\w*|twerk\w*|whine|whining|groov\w*|shak\w+ (?:her|his|their) (?:waist|hips)|amapiano|shaku|legwork|zanku|azonto|footwork|two-step)\b/i;
+const AERIAL = /\b(aerial|drone|bird'?s[- ]eye|overhead|top[- ]down|helicopter)\b/i;
+const PLAYER = /\b(guitar\w*|bass(?:ist| guitar)|piano|pianist|keys|keyboard\w*|drum\w*|percussion\w*|talking drum|conga\w*|djembe|sax\w*|trumpet\w*|horn\w*|violin\w*|cello|kora|flute|band|strum\w*|DJ|turntable\w*)\b/i;
+
+/**
+ * Tempo feel: the song's BPM and energy turned into how people move, so a
+ * slow song gets slow strums and sways and a fast one gets quick, tight hits.
+ * Dancers move on the beat at the song's real tempo; instrument players
+ * strum, strike or press in time with it (the classic AI tell is a guitarist
+ * strumming double-time over a ballad).
+ */
+function rhythmLine(rhythm: PromptInput['rhythm'], scene = ''): string {
   if (!rhythm) return '';
   const energy = rhythm.energy >= 0.7 ? 'high energy' : rhythm.energy >= 0.4 ? 'medium energy' : 'low energy, intimate';
+  const bpm = rhythm.bpm ?? null;
+  const beat = bpm ? ` (a beat every ${(60 / bpm).toFixed(2)} s)` : '';
+  const tempo = !bpm ? '' : bpm < 85 ? 'slow' : bpm < 112 ? 'mid-tempo' : 'up-tempo';
   const pace =
     rhythm.energy >= 0.7 ? 'driving body movement, still grounded and natural' : rhythm.energy >= 0.4 ? 'relaxed grooving movement' : 'slow, flowing movement and a still, gentle camera';
-  return `Music: ${rhythm.section.toLowerCase()}, ${energy}${rhythm.bpm ? `, ${rhythm.bpm} BPM` : ''}. ${pace}; head nods, shoulder bounces, steps and hand gestures land on the beat${rhythm.bpm ? ` (a beat every ${(60 / rhythm.bpm).toFixed(2)} s)` : ''}, the way a real artist feels the track, not choreographed for show.`;
+  const parts = [
+    `Music: ${rhythm.section.toLowerCase()}, ${energy}${bpm ? `, ${bpm} BPM, ${tempo}` : ''}. ${pace}; head nods, shoulder bounces, steps and hand gestures land on the beat${beat}, the way a real artist feels the track, not choreographed for show.`,
+  ];
+  if (DANCE.test(scene)) {
+    parts.push(
+      tempo === 'slow'
+        ? `Dancers move slowly with the ${bpm} BPM groove: smooth sways, body rolls and weight shifts that resolve on each beat, never fast or frantic.`
+        : tempo === 'up-tempo'
+          ? `Dancers hit the ${bpm} BPM beat: steps, footwork and arm hits land exactly on the beat${beat}, tight and together, matching the song's speed (never faster).`
+          : `Dancers groove in time with the ${bpm ?? 'song’s'} BPM beat${beat}: steps and bounces on the beat, relaxed and together.`,
+    );
+  }
+  if (PLAYER.test(scene)) {
+    parts.push(
+      tempo === 'slow'
+        ? `Instrument players play at the song's slow tempo: slow, sustained strums and soft, unhurried strikes, one motion per beat or slower${beat}; hands never move faster than the music.`
+        : tempo === 'up-tempo'
+          ? `Instrument players play in time with the fast beat: strums, strikes and key presses land on every beat${beat}, energetic and precise.`
+          : `Instrument players play in time with the song${beat}: steady strums and strikes on the beat, hands relaxed and believable.`,
+    );
+  }
+  if (AERIAL.test(scene)) {
+    parts.push(
+      `The aerial camera moves with the music: it glides steadily between hits, and each move (a rise, a push, a turn) starts on a kick drum or burst in the beat${beat}${rhythm.energy >= 0.7 ? ', with a stronger, faster push on the biggest hit' : ''}; smooth and real, like a drone pilot cutting to the track.`,
+    );
+  }
+  return parts.join(' ');
 }
+
+const placeLine = (place: string | undefined): string => (place ? `Cast and place: ${clampText(place, 300)}. Extras, passers-by, signage, streets, interiors and wardrobe belong to this place.` : '');
 
 /** Prompt for the identity-locked still (keyframe) of the scene's first frame. */
 export function keyframePrompt(input: PromptInput): string {
@@ -265,9 +310,13 @@ export function keyframePrompt(input: PromptInput): string {
     { text: `Shot: ${SHOTS[input.shot]}.`, keep: 0 },
     { text: `Scene: ${input.scene}`, keep: 0, scene: true },
     { text: input.style ? `Look and mood: ${clampText(input.style, 300)}.` : '', keep: 0 },
+    // The first frame sets who is around the subject and where: the cast mix and location land here.
+    { text: placeLine(input.place), keep: 5 },
     {
       text: input.lipSync
-        ? `The subject faces the camera (no more than three-quarter view), caught mid-phrase with the mouth naturally open on a vowel and teeth visible, mouth unobstructed, face large in frame and evenly lit${
+        ? `The subject faces the camera (no more than three-quarter view), caught mid-phrase singing ${
+            (input.performance?.intensity ?? 2) >= 3 ? 'a strong, open note (mouth open as a real singer’s is on a belted note, not gaping)' : (input.performance?.intensity ?? 2) <= 1 ? 'softly, lips just parted' : 'naturally, lips relaxed and only slightly apart'
+          }, mouth unobstructed, face large in frame and evenly lit${
             input.performance?.emotion ? `; expression: ${PERFORMANCE_EMOTIONS[input.performance.emotion]}` : ''
           }.`
         : '',
@@ -397,7 +446,8 @@ export function motionPrompt(input: PromptInput): string {
     },
     { text: input.featuresSubject ? STABILITY : '', keep: 8 },
     { text: REALISM, keep: 7 },
-    { text: rhythmLine(input.rhythm), keep: 6 },
+    { text: rhythmLine(input.rhythm, input.scene), keep: 6 },
+    { text: placeLine(input.place), keep: 6 },
     { text: input.musicVideo ? SHORT_FILM : '', keep: 4 },
     { text: LIFE, keep: 3 },
     { text: input.creative ? CREATIVE_CAMERA : '', keep: 2 },

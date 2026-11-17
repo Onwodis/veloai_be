@@ -11,6 +11,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
 import { isProduction } from '../config/env.js';
 import { Prisma } from '@prisma/client';
+import { isTransientDbError } from '../studio/sql.js';
 import { AppError } from '../utils/AppError.js';
 import { hideEngine } from '../utils/engineName.js';
 import { logger } from '../utils/logger.js';
@@ -59,6 +60,11 @@ function toAppError(error: unknown): AppError | null {
     if (DB_DOWN_CODES.has(error.code)) return new AppError(503, 'DATABASE_UNAVAILABLE', 'The database is not reachable right now. Try again shortly.');
   }
   if (error instanceof Prisma.PrismaClientInitializationError) {
+    return new AppError(503, 'DATABASE_UNAVAILABLE', 'The database is not reachable right now. Try again shortly.');
+  }
+  // Direct-SQL (postgres.js) connection failures: the statement never ran, so
+  // this is "try again", not a bug. Answered 503 (retryable), not 500.
+  if (isTransientDbError(error)) {
     return new AppError(503, 'DATABASE_UNAVAILABLE', 'The database is not reachable right now. Try again shortly.');
   }
 

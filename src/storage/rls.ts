@@ -13,8 +13,9 @@ import { sql, type Tx } from '../studio/sql.js';
 
 export async function withUser<T>(auth: Pick<AuthContext, 'userId' | 'role'>, fn: (tx: Tx) => Promise<T>): Promise<T> {
   return sql.begin(async (tx) => {
-    await tx`SELECT set_config('app.user_id', ${auth.userId}, true), set_config('app.role', ${auth.role}, true)`;
-    await tx`SET LOCAL ROLE app_rls`;
+    // One round trip: who is asking + the role switch (set_config('role', …, true) is SET LOCAL ROLE;
+    // verified to reset at commit exactly like it).
+    await tx`SELECT set_config('app.user_id', ${auth.userId}, true), set_config('app.role', ${auth.role}, true), set_config('role', 'app_rls', true)`;
     return fn(tx);
   }) as Promise<T>;
 }

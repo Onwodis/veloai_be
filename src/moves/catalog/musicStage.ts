@@ -25,7 +25,7 @@ export const duets = block('DUET', 'DUO', 'MEDIUM', 1, [
   ['Back-and-Forth Lines', 'trades lines with the partner face to face, each one stepping closer', 'Call and response with rising tension.', 'v', 'rpd', 'M', 2, { tags: ['two-person'] }],
   ['Walking Away Reach', 'walks away while the partner reaches after them, the hands just missing', 'Heartbreak duets.', 'b', 's', 'S', 2, { tags: ['two-person'] }],
   ['Slow Circle Each Other', 'circles slowly around the partner, eyes locked, singing in turns', 'Tension and attraction.', 'v', 'xry', 'S', 2, { tags: ['two-person'] }],
-  ['Hand Hold Pull', 'pulls the partner by the hand into the frame and spins them in', 'Joyful love songs.', 'c', 'hr', 'M', 3, { tags: ['two-person'] }],
+  ['Hand Hold Pull', 'pulls the partner by the hand into the frame and spins them in', 'Joyful love songs.', 'c',  'hr', 'M', 3, { tags: ['two-person'] }],
   ['Shoulder Lean Harmony', 'leans head on the partner\'s shoulder while they harmonise', 'Warm, close harmonies.', 'cv', 'rg', 'S', 1, { tags: ['two-person'] }],
   ['Argument Face-Off', 'squares up nose to nose with the partner, singing angry lines', 'Conflict verses; intense but respectful.', 'v', 'd', 'M', 3, { tags: ['two-person'] }],
   ['Laugh Together Break', 'both break into laughter between lines, foreheads close', 'Chemistry that feels unscripted.', 'a', 'hp', 'A', 1, { tags: ['two-person'] }],
