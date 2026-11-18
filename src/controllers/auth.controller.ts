@@ -25,7 +25,7 @@ import * as authService from '../services/auth.service.js';
 import * as mfa from '../services/mfa.service.js';
 import type { AuthResult } from '../services/auth.service.js';
 import { AppError } from '../utils/AppError.js';
-import { clearRefreshCookie, readRefreshCookie, setRefreshCookie } from '../utils/cookies.js';
+import { clearRefreshCookie, readRefreshCookie, setAccessCookie, setRefreshCookie } from '../utils/cookies.js';
 import { requestMeta } from '../utils/request.js';
 
 interface SessionResponse {
@@ -37,6 +37,8 @@ interface SessionResponse {
 
 function sendSession(res: Response, result: AuthResult, status = 200, extra: Record<string, unknown> = {}): void {
   setRefreshCookie(res, result.tokens.refreshToken, result.tokens.refreshTokenExpiresAt);
+  // The Next.js server loads pages with it (same origin, over the docker network).
+  setAccessCookie(res, result.tokens.accessToken, result.tokens.accessTokenExpiresAt);
   res.setHeader('Cache-Control', 'no-store');
   const body: SessionResponse = {
     user: result.user,

@@ -8,8 +8,11 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  // The app goes through Neon's connection pooler (PgBouncer, transaction mode).
+  url       = env("DATABASE_URL")
+  // Prisma Migrate needs a direct (unpooled) session: set by `neon deploy`.
+  directUrl = env("DATABASE_URL_UNPOOLED")
 }
 
 /// Platform-wide role. Workspace-level permissions live on `WorkspaceMember`.

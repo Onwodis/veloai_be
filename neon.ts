@@ -1,25 +1,23 @@
 import { defineConfig } from "@neon/config/v1";
 
+/**
+ * Neon project steep-flower-23682200 (aws-eu-central-1, Frankfurt: next to the
+ * Hetzner server in Nuremberg). The app uses Neon for Postgres only:
+ * files live in Cloudflare R2 and the AI calls go to Anthropic / fal.ai
+ * directly, so no AI gateway, buckets, auth or Data API are provisioned.
+ */
 export default defineConfig({
-  // Declare your Neon services here
   auth: false,
-  aiGateway: true,
-  buckets: {
-    // "private" is the default; use "public_read" for anonymous reads
-    assets: { access: "private" },
-  },
   // Branch policy: per-branch tuning
   branch: (branch) => {
     if (branch.isDefault) {
-      // Default branch: no overrides, uses project defaults
+      // Default (production) branch: project defaults.
       return {};
     }
     if (!branch.exists) {
-      // New non-default branches: auto-expire
-      // Run `neon checkout <name>` to create a new branch with these settings
+      // New non-default branches auto-expire (`neon checkout <name>`).
       return { ttl: "7d" };
     }
-    // Existing branch: no changes
     return {};
   },
 });

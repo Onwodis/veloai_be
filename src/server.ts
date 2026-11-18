@@ -16,6 +16,7 @@ import { BIN_DAYS, purgeExpiredBin } from './studio/service.js';
 import { runStorageLifecycle } from './storage/lifecycle.js';
 import { expireTrials } from './billing/trial.js';
 import { syncPortraits } from './billing/portraits.js';
+import { recoverPrologues } from './musicvideo/prologue.js';
 import { migrate } from './studio/sql.js';
 import { attachRealtime } from './realtime/ws.js';
 import { purgeExpiredRefreshTokens } from './services/auth.service.js';
@@ -148,6 +149,13 @@ async function main(): Promise<void> {
     intervalMs: HOUR,
     runOnBoot: true,
     run: syncPortraits,
+  });
+  scheduleJob({
+    name: 'recover-cold-opens',
+    description: 'Closes cold-open films left "filming" by a restart: charges only what was made, returns the rest of the hold',
+    intervalMs: 2 * MINUTE,
+    runOnBoot: true,
+    run: recoverPrologues,
   });
   scheduleJob({
     name: 'storage-lifecycle',

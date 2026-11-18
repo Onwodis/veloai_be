@@ -69,6 +69,11 @@ export const studioSettingsSchema = z.strictObject({
     characterStill: modelSchema,
     /** Commercials: text-to-speech for each character's lines (voice chosen per character). */
     tts: modelSchema,
+    /**
+     * Speech in a real person's voice, cloned from a reference recording (the artist's
+     * vocal stem): the cold open's lines in the artist's own voice and accent.
+     */
+    voiceClone: modelSchema,
   }),
   costs: z.strictObject({
     keyframe: z.number().int().min(0).max(100_000),
@@ -133,6 +138,8 @@ export const DEFAULT_STUDIO_SETTINGS: StudioSettings = {
     // Multilingual speech; the voice is picked per character (gender / age) in commercials/voice.ts.
     // extra.voices may map a character's accent or name to a voice id the admin prefers.
     tts: { endpoint: 'fal-ai/elevenlabs/tts/multilingual-v2', durations: [], extra: { stability: 0.5, similarity_boost: 0.75 }, enabled: true },
+    // Chatterbox: text + audio_url (the reference voice) in, audio.url out, in one call.
+    voiceClone: { endpoint: 'fal-ai/chatterbox/text-to-speech', durations: [], extra: { exaggeration: 0.35, cfg: 0.5, temperature: 0.7 }, enabled: true },
   },
   costs: { keyframe: 8, videoPerSecond: 12, lipSyncPerSecond: 6, upscalePerSecond: 4, assemblyPerMinute: 20, identity: 15, director: 10, likenessAnalysis: 20, likenessTraining: 150, image: 8, imageEdit: 8, imageUpscale: 6, mvCasting: 15, mvScene: 2, mvChat: 3, mvStoryboard: 12, mvLyricsPerMinute: 10, mvMix: 5, foleyPerSecond: 2, videoEditPerSecond: 190, characterStill: 45, ttsPerSecond: 1 },
   // maxPhotos covers a whole music-video cast (several photos per character).

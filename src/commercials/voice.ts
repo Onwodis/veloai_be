@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { probe } from '../media/ffmpeg.js';
+import { mediaDuration } from '../media/ffmpeg.js';
 import type { AuthContext } from '../middleware/authenticate.js';
 import { keys, uploadFile } from '../services/storage.service.js';
 import { releaseSystem, reserveTokens, settleSystem } from '../services/token.service.js';
@@ -73,7 +73,8 @@ export async function recordSceneLine(
     const result = await fal.wait(handle, { timeoutMs: 3 * 60_000 });
     const file = join(dir, 'voice.mp3');
     await downloadUrl(audioUrl(result), file);
-    const { durationSec } = await probe(file);
+    // Audio only: probe() demands a video stream.
+    const durationSec = await mediaDuration(file);
 
     const [asset] = await sql<{ id: string }[]>`
       INSERT INTO studio_assets (project_id, workspace_id, role, key, name, content_type, size, meta, status)

@@ -10,8 +10,10 @@
 #   worker   node dist/worker.js            (reels + AI studio + likeness + creations)
 #   migrate  sh -c "pnpm exec prisma migrate deploy && node dist/scripts/studio-migrate.js"
 #
-# Configuration comes only from the environment (env_file: ./be/.env in compose);
-# no .env file is baked into the image (see .dockerignore).
+# Configuration comes only from the environment at runtime (compose env_file: ./be/.env,
+# which is be/.env.prod copied in on the server); no .env file is baked into the image
+# (see .dockerignore). Nothing in the build needs a secret: prisma generate reads only
+# the schema.
 
 ARG NODE_VERSION=22-alpine
 

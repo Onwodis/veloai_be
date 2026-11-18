@@ -556,7 +556,14 @@ musicVideoRouter.get('/:projectId/audio/source', validate({ params: projectParam
 /* Cold open: a short narrated film VeloBot directs to play before the song (prologue.ts). */
 const prologuePlanBody = z.strictObject({ idea: z.string().trim().max(4000).optional(), seconds: z.number().min(10).max(45).default(20) });
 const prologueSaveBody = z.strictObject({ plan: prologue.planSchema.optional(), enabled: z.boolean().optional() });
-const prologueFilmBody = z.strictObject({ dryRun: z.boolean().default(false) });
+const prologueFilmBody = z.strictObject({
+  dryRun: z.boolean().default(false),
+  refilm: z.array(z.string().trim().min(1).max(40)).max(8).default([]),
+  /** Just these shots (tried one by one before the mix); empty = everything, then the mix. */
+  only: z.array(z.string().trim().min(1).max(40)).max(8).default([]),
+  /** With `only`: just record their lines (hear them before filming). */
+  voiceOnly: z.boolean().default(false),
+});
 musicVideoRouter.get('/:projectId/prologue', validate({ params: projectParams }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);
   return prologue.prologueView(requireAuth(req), workspaceId, projectId);
@@ -571,9 +578,15 @@ musicVideoRouter.put('/:projectId/prologue', validate({ params: projectParams, b
   const body = validBody(req, prologueSaveBody);
   return prologue.savePrologue(requireAuth(req), workspaceId, projectId, { plan: body.plan, enabled: body.enabled });
 }));
+const prologueControlBody = z.strictObject({ action: z.enum(['pause', 'stop']) });
+musicVideoRouter.post('/:projectId/prologue/control', validate({ params: projectParams, body: prologueControlBody }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return prologue.controlPrologue(requireAuth(req), workspaceId, projectId, validBody(req, prologueControlBody).action);
+}));
 musicVideoRouter.post('/:projectId/prologue/film', validate({ params: projectParams, body: prologueFilmBody }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);
-  return prologue.filmPrologue(requireAuth(req), workspaceId, projectId, validBody(req, prologueFilmBody).dryRun);
+  const body = validBody(req, prologueFilmBody);
+  return prologue.filmPrologue(requireAuth(req), workspaceId, projectId, body.dryRun, body.refilm, { only: body.only, voiceOnly: body.voiceOnly });
 }));
 
 /* Remix studio: a music video clip → a new short clip of its main character (remix.ts). */

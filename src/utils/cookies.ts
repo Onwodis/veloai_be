@@ -1,8 +1,13 @@
 /**
- * Refresh-token cookie handling.
+ * Session cookies.
  *
- * HttpOnly (no JS access), Secure, SameSite=Strict, and scoped to the auth
- * routes so the token is not sent with any other API call.
+ *   refresh  HttpOnly, Secure, SameSite=Strict, scoped to the auth routes so
+ *            the token is not sent with any other API call.
+ *   access   the short-lived access token (same lifetime as the JWT), HttpOnly,
+ *            Secure, SameSite=Strict, for the whole site: only the Next.js
+ *            server reads it, to load pages server-side over the docker network
+ *            (it sends it on as a Bearer header). The API itself never reads it
+ *            (Bearer header only), so it adds no CSRF surface.
  */
 import type { CookieOptions, Request, Response } from 'express';
 import { env } from '../config/env.js';
@@ -24,8 +29,20 @@ export function setRefreshCookie(res: Response, token: string, expiresAt: Date):
   res.cookie(REFRESH_COOKIE, token, { ...baseOptions(), expires: expiresAt });
 }
 
+/** Clears the whole session: the refresh cookie and the server-side access cookie. */
 export function clearRefreshCookie(res: Response): void {
   res.clearCookie(REFRESH_COOKIE, baseOptions());
+  res.clearCookie(ACCESS_COOKIE, accessOptions());
+}
+
+export const ACCESS_COOKIE = `${env.APP_SLUG.replace(/-/g, '_')}_at`;
+
+function accessOptions(): CookieOptions {
+  return { ...baseOptions(), path: '/' };
+}
+
+export function setAccessCookie(res: Response, token: string, expiresAt: Date): void {
+  res.cookie(ACCESS_COOKIE, token, { ...accessOptions(), expires: expiresAt });
 }
 
 export function readRefreshCookie(req: Request): string | undefined {
