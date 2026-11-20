@@ -255,6 +255,10 @@ export interface TakeSpec {
   place?: string | undefined;
   /** Music videos: bold, sharp AI camera work (creative mode). */
   creative?: boolean | undefined;
+  /** Music videos: how hard the camera works (natural / bold / wild, studio/cinema.ts CAMERA_ENERGY). */
+  energy?: 'natural' | 'bold' | 'wild' | undefined;
+  /** The video's opening shot: built to stop the scroll. */
+  hook?: boolean | undefined;
   /** Music videos: pop short-film performance standard in every prompt. */
   musicVideo?: boolean | undefined;
   /** @me with a trained identity model: keyframes come from the likeness model (sharper identity). */

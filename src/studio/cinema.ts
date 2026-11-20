@@ -27,6 +27,19 @@ export const SHOTS = {
   handheld: 'Handheld documentary camera with subtle natural shake, intimate and immediate',
   'slow-motion': 'High-frame-rate slow motion capture, every movement smooth and deliberate',
   performance: 'Subject singing directly to camera with real emotion on the whole face, medium close-up',
+  // Kinetic music-video camera (bold / wild energy).
+  'fpv-dive': 'FPV drone dive: the camera plunges from height and races low across the scene, pulling up hard onto the subject',
+  'fpv-flythrough': 'FPV drone flying fast through the space, threading a doorway or a gap in the crowd and banking around the subject',
+  'orbit-360': 'Fast 360-degree orbit around the subject at chest height, the background whipping round behind them',
+  'whip-pan': 'Whip pan: the camera snaps sideways onto the subject through a streak of motion blur and lands dead on them',
+  'crash-zoom': "Crash zoom: a sudden, punchy zoom from wide straight into the subject's face, landing on the beat",
+  'dutch-angle': 'Dutch angle: the frame tilted 20-30 degrees, tense and stylish, the subject sharp in the tilted frame',
+  'worms-eye': "Worm's-eye view: the lens on the ground looking straight up at the subject towering over it against the sky",
+  'overhead-spin': 'Overhead top-down shot directly above the subject, the frame slowly spinning',
+  'dolly-zoom': 'Dolly zoom (vertigo effect): the subject stays the same size while the background stretches away behind them',
+  snorricam: 'Body-mounted camera (snorricam): the subject locked in the centre of the frame while the world swings and bounces around them',
+  'push-through': 'The camera pushes through a gap (a window, a fence, a crowd, hanging fabric) and lands on the subject',
+  'speed-ramp': 'Speed ramp: real-time motion that drops into slow motion at the peak moment, then snaps back to speed',
 } as const;
 export type Shot = keyof typeof SHOTS;
 export const SHOT_IDS = Object.keys(SHOTS) as [Shot, ...Shot[]];
@@ -166,6 +179,10 @@ export interface PromptInput {
   place?: string | undefined;
   /** Creative mode: sharp, bold camera work. */
   creative?: boolean | undefined;
+  /** How hard the camera works (CAMERA_ENERGY); default natural. */
+  energy?: CameraEnergy | undefined;
+  /** The video's opening shot: built to stop the scroll (HOOK). */
+  hook?: boolean | undefined;
   /** Music video: real-world music-video performance standard. */
   musicVideo?: boolean | undefined;
   /** Lip-synced shot: the subject sings these words to the song. */
@@ -322,6 +339,10 @@ export function keyframePrompt(input: PromptInput): string {
         : '',
       keep: 0,
     },
+    {
+      text: input.hook ? 'The opening frame of the video: a bold, graphic composition with depth and a strong angle that grabs attention at once; the moment is already in motion.' : '',
+      keep: 0,
+    },
     { text: `Frame for a ${input.aspect} aspect ratio.`, keep: 0 },
     {
       text: 'Looks like an untouched frame from real footage: natural available light, true colour, real lens falloff, realistic skin with pores and small blemishes, flyaway hairs, real fabric with creases and lint, an ordinary lived-in background, no retouching, no glow, no text or logos.',
@@ -351,7 +372,71 @@ export const CAMERA_LANGUAGE: Record<Shot, string> = {
   handheld: 'Handheld camera, 35mm, organic micro-movement and small reframes, documentary realism.',
   'slow-motion': 'Gentle slow motion (60 fps played at 24), 50mm, fluid natural motion.',
   performance: 'Performance shot, 50-85mm, the artist singing to camera, operator handheld with a slight natural sway, light from a real source on the face.',
+  'fpv-dive': 'FPV racing drone, 14mm wide, starts high and dives steeply, skims low and fast over the ground, then pulls up and slows to frame the subject; real speed, slight horizon roll.',
+  'fpv-flythrough': 'FPV racing drone, 14mm wide, one continuous fast flight through the real space, threading a gap, banking around the subject, motion blur at the edges.',
+  'orbit-360': 'Handheld gimbal orbit, 24mm, one fast complete circle around the subject at chest height, the subject sharp in the centre, background streaking behind.',
+  'whip-pan': 'Operator whip pan, 35mm: a fast horizontal snap with heavy directional motion blur that stops precisely framed on the subject.',
+  'crash-zoom': 'Zoom lens, 24-200mm: a sudden fast zoom from wide to a tight face shot, slight overshoot and settle, handheld energy.',
+  'dutch-angle': 'Dutch angle, 28mm, camera rolled 20-30 degrees, slow drift toward the subject, strong diagonals in the frame.',
+  'worms-eye': "Camera on the ground pointing up, 16mm wide, the subject towering above the lens, sky or ceiling behind, slow upward tilt.",
+  'overhead-spin': 'Top-down, 24mm, camera directly above the subject, slow continuous rotation of the whole frame.',
+  'dolly-zoom': 'Dolly zoom (vertigo): the camera tracks back while zooming in, 24-70mm, the subject the same size, the background stretching away.',
+  snorricam: 'Body-mounted rig, 24mm, the camera fixed to the subject facing them: they stay centred and steady while the background swings with every step.',
+  'push-through': 'Gimbal, 24mm, a continuous forward move through a foreground gap (glass, fence, fabric, a crowd) that opens onto the subject.',
+  'speed-ramp': 'High-frame-rate capture, 35mm: real-time motion that ramps down into smooth slow motion at the peak action, then back up to real time.',
 };
+
+/** Kinetic shots: the camera itself is the show. */
+export const KINETIC_SHOTS: ReadonlySet<Shot> = new Set(['fpv-dive', 'fpv-flythrough', 'orbit-360', 'whip-pan', 'crash-zoom', 'overhead-spin', 'dolly-zoom', 'push-through', 'speed-ramp']);
+
+/**
+ * A lip-synced shot needs the face large, steady and readable for the whole clip (a mouth a few
+ * pixels wide, or smeared by motion, can't be synced). A kinetic shot asked for on a lip-synced
+ * scene keeps its attitude in a face-safe form: tilted, low, body-mounted or a short push.
+ */
+export function lipSafeShot(shot: Shot): Shot {
+  switch (shot) {
+    case 'fpv-dive':
+    case 'fpv-flythrough':
+    case 'push-through':
+      return 'dolly-in';
+    case 'orbit-360':
+    case 'overhead-spin':
+    case 'speed-ramp':
+    case 'whip-pan':
+    case 'dolly-zoom':
+      return 'performance';
+    case 'crash-zoom':
+    case 'extreme-close-up':
+      return 'close-up';
+    case 'worms-eye':
+      return 'low-angle';
+    default:
+      return shot;
+  }
+}
+
+/**
+ * How hard the camera works. natural = the restrained real-life look; bold = a motivated move on
+ * every shot and striking angles on the big moments; wild = full music-video energy. The picture
+ * itself (real light, real skin, real places) stays photoreal at every level.
+ */
+export const CAMERA_ENERGY = {
+  natural: '',
+  bold:
+    'Camera with attitude: the shot has a clear, motivated move (a push, an orbit, a rise, a fast track) that lands on the beat, a strong composition with foreground layers and depth, ' +
+    'a striking angle when the moment is big; the frame is never static or flat. Still real lenses, real physics, real light.',
+  wild:
+    'Full-energy music-video camera: kinetic, daring moves (FPV dives and fly-throughs, fast orbits, whip pans, crash zooms, tilted and extreme low or top-down angles, speed ramps) ' +
+    'that dance with the artist and hit the beat, foreground objects wiping across the lens; every frame bold and graphic, yet real lenses, real physics, real light and real people.',
+} as const;
+export type CameraEnergy = keyof typeof CAMERA_ENERGY;
+export const CAMERA_ENERGY_IDS = Object.keys(CAMERA_ENERGY) as [CameraEnergy, ...CameraEnergy[]];
+
+/** The opening shot: it has one second to stop a viewer scrolling. */
+export const HOOK =
+  'This is the opening shot and must stop the viewer in the first second: the action and the camera are already moving at frame 1, one striking, unexpected image (a bold angle, ' +
+  'a sudden move, eyes straight to the lens), no slow fade-in, no empty establishing beat.';
 
 /** Picture quality cues a colourist and DP would sign off on, kept restrained. */
 export const GRADE =
@@ -450,7 +535,10 @@ export function motionPrompt(input: PromptInput): string {
     { text: placeLine(input.place), keep: 6 },
     { text: input.musicVideo ? SHORT_FILM : '', keep: 4 },
     { text: LIFE, keep: 3 },
-    { text: input.creative ? CREATIVE_CAMERA : '', keep: 2 },
+    { text: input.creative && !input.energy ? CREATIVE_CAMERA : '', keep: 2 },
+    // The camera's energy outranks the realism boilerplate: it is what makes the shot.
+    { text: input.energy ? CAMERA_ENERGY[input.energy] : '', keep: 8 },
+    { text: input.hook ? HOOK : '', keep: 0 },
     { text: 'One continuous shot, no cuts, no morphing.', keep: 0 },
     { text: GRADE, keep: 1 },
   ]);

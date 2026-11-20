@@ -50,6 +50,8 @@ import {
 } from './schemas.js';
 import * as studio from './service.js';
 import { getStudioSettings, saveStudioSettings, studioSettingsSchema } from './settings.js';
+import { activeModels, getVideoModelSettings, JOB_LABEL, saveVideoModelSettings, useModel, VIDEO_JOBS, VIDEO_MODELS, videoModelAdvice, videoModelSettingsSchema } from './videoModels.js';
+import { AppError } from '../utils/AppError.js';
 import { sql } from './sql.js';
 
 const profileSchema = z.strictObject({ profile: z.string().trim().min(10).max(3000) });
@@ -207,6 +209,34 @@ adminStudioRouter.get('/', async (_req: Request, res: Response) => {
 
 adminStudioRouter.put('/', validate({ body: studioSettingsSchema }), async (req: Request, res: Response) => {
   res.json({ settings: await saveStudioSettings(validBody(req, studioSettingsSchema), requireAuth(req).userId) });
+});
+
+/* Video models: the catalog, which are switched on, what each job uses, measured performance and advice. */
+async function videoModelsView(days: number) {
+  const [settings, active, advice] = await Promise.all([getVideoModelSettings(), activeModels(), videoModelAdvice(days)]);
+  return { catalog: VIDEO_MODELS, jobs: JOB_LABEL, settings, active, days, ...advice };
+}
+const videoModelsQuery = z.strictObject({ days: z.coerce.number().int().min(7).max(365).default(90) });
+adminStudioRouter.get('/video-models', validate({ query: videoModelsQuery }), async (_req: Request, res: Response) => {
+  res.json(await videoModelsView(validQuery(res, videoModelsQuery).days));
+});
+adminStudioRouter.put('/video-models', validate({ body: videoModelSettingsSchema }), async (req: Request, res: Response) => {
+  try {
+    const { moved } = await saveVideoModelSettings(validBody(req, videoModelSettingsSchema), requireAuth(req).userId);
+    res.json({ ...(await videoModelsView(90)), moved });
+  } catch (error) {
+    throw AppError.badRequest(error instanceof Error ? error.message : 'Could not save.');
+  }
+});
+const useModelBody = z.strictObject({ job: z.enum(VIDEO_JOBS), modelId: z.string().trim().min(1).max(60) });
+adminStudioRouter.post('/video-models/use', validate({ body: useModelBody }), async (req: Request, res: Response) => {
+  const body = validBody(req, useModelBody);
+  try {
+    await useModel(body.job, body.modelId, requireAuth(req).userId);
+  } catch (error) {
+    throw AppError.badRequest(error instanceof Error ? error.message : 'Could not switch the model.');
+  }
+  res.json(await videoModelsView(90));
 });
 
 adminStudioRouter.post('/check-key', async (_req: Request, res: Response) => {

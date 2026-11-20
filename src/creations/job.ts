@@ -27,6 +27,7 @@ import * as fal from '../studio/fal.js';
 import { runResumable, type SavedFal } from '../studio/falRun.js';
 import { conformImage, downloadUrl, thumbnail } from '../studio/files.js';
 import { getStudioSettings, pickDuration } from '../studio/settings.js';
+import { animationRequest } from '../studio/videoModels.js';
 import { json, sql, withSqlRetry } from '../studio/sql.js';
 import { logger } from '../utils/logger.js';
 import { getWatermarkSettings } from '../billing/watermarkRemoval.js';
@@ -171,14 +172,19 @@ export async function runCreation(id: string): Promise<void> {
         await uploadFile(frameKey, still, 'image/png');
         frameUrl = await readUrl(frameKey);
       }
-      const result = await run('VIDEO', model.endpoint, {
-        ...model.extra,
-        // The identity token only means something to the likeness model, not the video model.
-        prompt: [motion, me?.lora ? prompt.replaceAll(`${me.lora.triggerWord} person`, 'the person') : prompt, row.usesMe ? 'The person keeps the same face and body from the first frame throughout.' : '', row.usesMe ? STABILITY : '', REALISM].filter(Boolean).join(' '),
-        negative_prompt: NEGATIVE,
-        ...(duration.param ? { duration: duration.param } : {}),
-        ...(frameUrl ? { image_url: frameUrl } : { aspect_ratio: ASPECTS[row.aspect].model }),
-      });
+      // Each video model's own request shape (Seedance has no negative prompt, for one).
+      const result = await run(
+        'VIDEO',
+        model.endpoint,
+        animationRequest(model, {
+          // The identity token only means something to the likeness model, not the video model.
+          prompt: [motion, me?.lora ? prompt.replaceAll(`${me.lora.triggerWord} person`, 'the person') : prompt, row.usesMe ? 'The person keeps the same face and body from the first frame throughout.' : '', row.usesMe ? STABILITY : '', REALISM].filter(Boolean).join(' '),
+          negative: NEGATIVE,
+          duration: duration.param,
+          imageUrl: frameUrl,
+          aspect: ASPECTS[row.aspect].model,
+        }),
+      );
       outputFile = join(workDir, 'output.mp4');
       await downloadUrl(fal.outputUrl(result, 'video'), outputFile);
       charge += costs.video;

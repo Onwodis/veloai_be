@@ -24,13 +24,14 @@ import { probe } from '../media/ffmpeg.js';
 import { deletePrefix, downloadToFile, keys, readUrl, uploadFile } from '../services/storage.service.js';
 import { releaseSystem, settleSystem, touchReservation } from '../services/token.service.js';
 import { logger } from '../utils/logger.js';
-import { ASPECTS, keyframePrompt, motionPrompt, negativePrompt, softDelivery, type Aspect, type PromptInput } from './cinema.js';
+import { ASPECTS, KINETIC_SHOTS, keyframePrompt, lipSafeShot, motionPrompt, negativePrompt, softDelivery, type Aspect, type PromptInput } from './cinema.js';
 import * as fal from './fal.js';
 import { conformImage, downloadUrl, thumbnail } from './files.js';
 import { isReactLipSync, lipSyncInput, muxMaster, REACT_MAX_SECONDS, vocalSlice, vocalStem } from './lipsync.js';
 import { getStudioSettings, pickDuration, type StudioModel, type StudioSettings } from './settings.js';
 import { json, sql, withSqlRetry } from './sql.js';
 import { ACTIVE_TAKE, type TakeRow, type TakeSpec, type TakeStatus } from './types.js';
+import { animationRequest, getVideoModelSettings, kineticModel, seedanceReferenceRequest, videoFamily } from './videoModels.js';
 import { publishProgress } from '../realtime/events.js';
 
 class Canceled extends Error {}
@@ -205,9 +206,13 @@ export async function runTake(takeId: string): Promise<void> {
     return result;
   };
 
+  const syncing = Boolean(spec.lipSync && spec.music && models.lipSync.enabled);
   const promptInput: PromptInput = {
     scene: spec.prompt || spec.description,
-    shot: spec.shot,
+    // A lip-synced face must stay large and steady: a kinetic move becomes its face-safe form.
+    shot: syncing ? lipSafeShot(spec.shot) : spec.shot,
+    energy: spec.energy,
+    hook: spec.hook,
     style: spec.style,
     identity: spec.identityProfile,
     featuresSubject: spec.featuresSubject,
@@ -216,7 +221,7 @@ export async function runTake(takeId: string): Promise<void> {
     place: spec.place,
     creative: spec.creative,
     musicVideo: spec.musicVideo,
-    lipSync: Boolean(spec.lipSync && spec.music && models.lipSync.enabled),
+    lipSync: syncing,
     lyric: spec.lyric,
     performance: spec.performance,
   };
@@ -260,6 +265,40 @@ export async function runTake(takeId: string): Promise<void> {
       }
     }
 
+    /**
+     * The shot's isolated vocal, `seconds` long (silent between sung lines), uploaded for an engine:
+     * used as Seedance's @Audio1 before animating and by the lip-sync pass after. The song and the
+     * stem are fetched once per take.
+     */
+    let voiceSource: { song: string; source: string; isolated: boolean } | null = null;
+    const owner = { workspaceId: take.workspaceId, projectId: take.projectId };
+    const vocalFor = async (seconds: number, soft = softDelivery(promptInput)): Promise<{ key: string; song: string }> => {
+      const music = spec.music!;
+      if (!voiceSource) {
+        // Isolated vocals (cached per mix), so only the voice drives the mouth.
+        const song = join(workDir, 'song');
+        await downloadToFile(music.key, song);
+        const stem = await vocalStem(music.key, models.vocalStem, run, workDir);
+        let source = song;
+        if (stem) {
+          source = join(workDir, 'stem.wav');
+          await downloadToFile(stem.key, source);
+          engines.push(`vocals: ${stem.reused ? 'cached stem' : models.vocalStem.endpoint}`);
+        } else {
+          engines.push('vocals: stem unavailable, band-passed mix');
+        }
+        voiceSource = { song, source, isolated: Boolean(stem) };
+      }
+      // Hums, low choruses and cool lines are sung softly: small mouth, no forced shapes.
+      const slice = join(workDir, `slice-${Math.round(seconds * 1000)}.wav`);
+      await vocalSlice({ source: voiceSource.source, isolated: voiceSource.isolated, start: music.start, seconds, vocals: music.vocals, out: slice, soft });
+      const key = keys.studioTake(owner.workspaceId, owner.projectId, takeId, 'audio.wav');
+      await uploadFile(key, slice, 'audio/wav');
+      return { key, song: voiceSource.song };
+    };
+    /** The video model was given the vocal itself (Seedance 2.x @Audio1). */
+    let nativeVocal = false;
+
     /* ANIMATING (or EDIT for post-processing) --------------------------- */
     await enter('ANIMATING');
     let duration: { param: string | null; seconds: number };
@@ -277,21 +316,42 @@ export async function runTake(takeId: string): Promise<void> {
       });
       videoUrl = fal.outputUrl(result, 'video');
     } else {
-      const model = animationModel(settings, spec, Boolean(frameKey));
+      // Kinetic camera shots (FPV, orbits, whip pans…) can go to the model the admin routes them to:
+      // the best camera model films the camera shots, the best identity / lip-sync model the rest.
+      const routed = !syncing && KINETIC_SHOTS.has(promptInput.shot) ? await kineticModel(Boolean(frameKey)) : null;
+      const model = routed ?? animationModel(settings, spec, Boolean(frameKey));
+      if (routed) engines.push(`camera shot routed to ${routed.endpoint}`);
       if (!model.enabled) throw new Error(`The ${frameKey ? 'image' : 'text'}-to-video model is switched off in the console.`);
       duration = pickDuration(model, spec.durationSec);
       let input: Record<string, unknown>;
-      if (frameKey && model === models.referenceVideo && spec.identityElements?.length) {
+      if (frameKey && model === models.referenceVideo && spec.identityElements?.length && videoFamily(model.endpoint) === 'seedance2') {
+        // Seedance 2.x: start frame + identity photos as @Image tags, and on a lip-synced shot the
+        // shot's isolated vocal as @Audio1, so the model animates the singer to the song itself.
+        const vocal = spec.lipSync && spec.music ? await vocalFor(duration.seconds) : null;
+        const elements = spec.identityElements;
+        input = seedanceReferenceRequest(model, {
+          frameUrl: await readUrl(frameKey),
+          people: await Promise.all(elements.map(async (person) => ({ name: person.name, urls: await Promise.all(person.keys.slice(0, 3).map((key) => readUrl(key))) }))),
+          prompt: (references) => motionPrompt({ ...promptInput, references }),
+          negative: negativePrompt(promptInput.lipSync ?? false),
+          duration: duration.param,
+          aspect: ASPECTS[spec.aspect].model,
+          vocalUrl: vocal ? await readUrl(vocal.key) : null,
+          singer: elements[0]?.name ?? null,
+        });
+        nativeVocal = Boolean(vocal);
+        engines.push(`identity: ${elements.length} reference(s)${vocal ? ' + the vocal as @Audio1 (native lip sync)' : ''}`);
+      } else if (frameKey && model === models.referenceVideo && spec.identityElements?.length) {
         input = await referenceRequest(model, { frameKey, elements: spec.identityElements, prompt: promptInput, duration: duration.param, aspect: spec.aspect });
         engines.push(`identity: ${spec.identityElements.length} reference element(s)`);
       } else {
-        input = {
-          ...model.extra,
+        input = animationRequest(model, {
           prompt: motionPrompt(promptInput),
-          negative_prompt: negativePrompt(promptInput.lipSync ?? false),
-          ...(duration.param ? { duration: duration.param } : {}),
-          ...(frameKey ? { image_url: await readUrl(frameKey) } : { aspect_ratio: size.model }),
-        };
+          negative: negativePrompt(promptInput.lipSync ?? false),
+          duration: duration.param,
+          imageUrl: frameKey ? await readUrl(frameKey) : null,
+          aspect: size.model,
+        });
       }
       videoUrl = fal.outputUrl(await run('ANIMATING', model.endpoint, input), 'video');
     }
@@ -300,7 +360,20 @@ export async function runTake(takeId: string): Promise<void> {
     let lipSynced = false;
     /** Set when the take's final file is already on disk (lip-synced + muxed). */
     let finalFile: string | null = null;
-    if (spec.lipSync && spec.music && models.lipSync.enabled) {
+    const trustNative = nativeVocal && (await getVideoModelSettings()).nativeLipSync === 'native';
+    if (spec.lipSync && spec.music && trustNative) {
+      // The video model already sang to the vocal (Seedance @Audio1) and the admin trusts it:
+      // no lip-sync pass, just the mastered mix under the picture.
+      await enter('LIPSYNC');
+      const base = join(workDir, 'base.mp4');
+      await downloadUrl(videoUrl, base);
+      const seconds = (await probe(base)).durationSec || duration.seconds;
+      const song = join(workDir, 'song');
+      await downloadToFile(spec.music.key, song);
+      finalFile = join(workDir, 'take.mp4');
+      await muxMaster({ video: base, song, start: spec.music.start, seconds, out: finalFile });
+      engines.push('lip sync: native (the video model, no separate pass)');
+    } else if (spec.lipSync && spec.music && models.lipSync.enabled) {
       await enter('LIPSYNC');
       const music = spec.music;
       // The base clip's real length (models render 5.04 s for "5"): the audio is cut to exactly this.
@@ -313,25 +386,10 @@ export async function runTake(takeId: string): Promise<void> {
       const syncModel = expressive ? models.lipSyncExpressive : models.lipSync;
       if (isReactLipSync(syncModel.endpoint) && seconds > REACT_MAX_SECONDS) throw new Error(`react-1 lip sync takes clips up to ${REACT_MAX_SECONDS} s; this one is ${seconds.toFixed(1)} s.`);
 
-      // 1. Isolated vocals (cached per mix), so only the voice drives the mouth.
-      const song = join(workDir, 'song');
-      await downloadToFile(music.key, song);
-      const stem = await vocalStem(music.key, models.vocalStem, run, workDir);
-      let source = song;
-      if (stem) {
-        source = join(workDir, 'stem.wav');
-        await downloadToFile(stem.key, source);
-        engines.push(`vocals: ${stem.reused ? 'cached stem' : models.vocalStem.endpoint}`);
-      } else {
-        engines.push('vocals: stem unavailable, band-passed mix');
-      }
-      // 2. The stem under this shot, exactly as long as the clip, silent between sung lines.
-      // Hums, low choruses and cool lines are sung softly: small mouth, no forced shapes.
+      // 1-2. The isolated vocal under this shot, exactly as long as the clip, silent between sung lines.
       const soft = softDelivery(promptInput);
-      const slice = join(workDir, 'slice.wav');
-      await vocalSlice({ source, isolated: Boolean(stem), start: music.start, seconds, vocals: music.vocals, out: slice, soft });
-      const audioKey = keys.studioTake(take.workspaceId, take.projectId, takeId, 'audio.wav');
-      await uploadFile(audioKey, slice, 'audio/wav');
+      const { key: audioKey, song } = await vocalFor(seconds, soft);
+      if (nativeVocal) engines.push('lip sync: refined over the native sync');
 
       // 3. Lip sync, frame-exact (cut_off); expressive: the scene's emotion + intensity.
       const synced = await run('LIPSYNC', syncModel.endpoint, lipSyncInput(syncModel, videoUrl, await readUrl(audioKey), spec.performance, soft));

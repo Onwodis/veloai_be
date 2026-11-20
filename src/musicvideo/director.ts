@@ -25,9 +25,27 @@ const RULES =
   'Never identify real people from their photos and never speculate about sensitive traits. ' +
   'Styling can be glamorous, sensual in attitude and confident, but never sexually explicit, never nude, never suggestive of minors. ' +
   'Video models need one clear action per shot, grounded locations, motivated light and believable wardrobe. ' +
-  'The look is real life, never "AI cinematic": available light from real sources, natural colour, subtle camera work (tripod, handheld, slow steadicam, gentle push-ins), ' +
-  'no whip pans, crash zooms, Dutch angles, glowing haze, lens-flare showers or neon overload unless the artist asks. People look like real people: natural styling by default, ' +
-  'real skin with pores and small imperfections, lived-in clothes. Keep head and body turns slow and small; the face must stay readable and solid through every turn.';
+  'The picture is real life, never "AI cinematic": available light from real sources, natural colour, no glowing haze, lens-flare showers or neon overload unless the artist asks; ' +
+  'how hard the camera works follows <camera_energy>. People look like real people: natural styling by default, real skin with pores and small imperfections, lived-in clothes. ' +
+  'On lip-synced shots keep head and body turns small and the face large, steady and readable (the mouth must be clear for the whole shot).';
+
+/** Camera direction per energy level (the project's setting; studio/cinema.ts CAMERA_ENERGY renders it). */
+const CAMERA_DIRECTION: Record<'natural' | 'bold' | 'wild', string> = {
+  natural: 'natural: restrained, real-life camera work (tripod, handheld, slow steadicam, gentle push-ins); no whip pans, crash zooms or Dutch angles.',
+  bold:
+    'bold: every shot has a motivated camera move that lands on the beat (push-in, orbit-360, tracking, crane, push-through), striking angles on the big moments (low-angle, worms-eye, dutch-angle, overhead-spin, dolly-zoom), ' +
+    'strong compositions with foreground layers; an occasional FPV or whip-pan for a drop or a turn.',
+  wild:
+    'wild: full music-video energy: kinetic shots everywhere they fit (fpv-dive, fpv-flythrough, orbit-360, whip-pan, crash-zoom, snorricam, speed-ramp, dutch-angle, worms-eye, overhead-spin), ' +
+    'the camera dancing with the artist on every beat; still real places, real light, real people.',
+};
+
+/** What makes a video grab and hold attention: the hook and the rhythm of the cuts. */
+const ATTENTION =
+  '<hook_and_rhythm>The FIRST scene is the hook: it must stop a viewer scrolling within one second: motion from the first frame, the most striking image of the video (a bold angle, an unexpected action, ' +
+  'the artist’s eyes straight to the lens, the song’s strongest moment pulled forward if the story allows), never a slow establishing beat. After it, a pattern interrupt on every cut: change the shot size, ' +
+  'the angle or the camera move from one scene to the next (never two similar shots in a row), the biggest moves on the drops and chorus hits, quieter framing for intimate lines. ' +
+  'Lip-synced performance shots stay face-safe (close-up, medium, low-angle, dutch-angle, snorricam or a slow push); give the kinetic moves to story, dance and B-roll shots.</hook_and_rhythm>';
 
 /* ------------------------------------------------------------------ context */
 
@@ -44,6 +62,8 @@ export interface DirectorContext {
   lyrics: string | null;
   /** Bold, sharp camera work wanted. */
   creativeMode?: boolean;
+  /** How hard the camera works: natural / bold / wild. */
+  cameraEnergy?: 'natural' | 'bold' | 'wild';
   characters: Pick<CharacterRow, 'id' | 'name' | 'role' | 'isArtist' | 'profile' | 'prompt' | 'costumes'>[];
   scenes: { id: string; kind: string; description: string; prompt: string | null; durationSec: number; characterIds: string[]; location: string | null; costume: string | null; mode?: string | null; lyric?: string | null }[];
   /** Sections, words per section, bar length and the artist's direction settings (songmap.ts). */
@@ -79,10 +99,9 @@ export function contextText(context: DirectorContext): string {
     context.mood ? `<mood>${context.mood}</mood>` : '',
     '<craft>Aim for a real, well-made music video shot on location by a good crew: the artist performing naturally and with conviction, body riding the groove so head nods, shoulder bounces, steps and gestures land on the beat, ' +
       'performance shots in close-up or medium close-up, face toward the lens, mouth unobstructed, the artist singing with the feeling on the whole face (brows, forehead and eye creases, cheeks), never a still, blank face; the exact mouth shapes come from lip sync afterwards, ' +
-      'light from real sources, real places with real texture, story intercut with performance. Subtle, human, believable.</craft>',
-    context.creativeMode
-      ? '<creative_mode>ON: more deliberate, musical camera work, still real-world: slow push-ins that land on the downbeat, smooth tracking moves with the artist, an occasional slow drone reveal for big moments. No gimmicks.</creative_mode>'
-      : '',
+      'light from real sources, real places with real texture, story intercut with performance. Human and believable in the picture, as daring in the camera as <camera_energy> allows.</craft>',
+    `<camera_energy>${CAMERA_DIRECTION[context.cameraEnergy ?? (context.creativeMode ? 'wild' : 'bold')]}</camera_energy>`,
+    ATTENTION,
     context.place
       ? `<cast_and_place>${context.place}. Every scene is set here and its supporting cast, extras and crowd follow this mix; characters cast from photos keep their own looks. Write locations, extras and wardrobe that are true to this place.</cast_and_place>`
       : '',
@@ -265,7 +284,7 @@ const PlannedScene = z.object({
   prompt: z
     .string()
     .describe(
-      'Prompt for the video model, written like a DP describing real footage: one clear action, setting, time of day, the real light source, wardrobe, subtle camera behaviour. ' +
+      'Prompt for the video model, written like a DP describing real footage: one clear action, setting, time of day, the real light source, wardrobe, and the camera move (as strong as <camera_energy> asks, matched to the shot id). ' +
         'For lip-synced shots: close-up or medium close-up, the artist sings toward camera with the emotion on the whole face (brows, forehead and eye creases, cheeks), mouth unobstructed, head moving with the phrasing; ' +
         'do not script the mouth shapes (lip sync draws the words). Describe the face only through light and expression, never its features (identity comes from the cast photos). 50-110 words. No quality buzzwords, no "cinematic", "epic" or "stunning".',
     ),

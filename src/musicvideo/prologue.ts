@@ -32,6 +32,7 @@ import { deleteObject, downloadToFile, headObject, keys, listObjects, readUrl, u
 import { releaseSystem, reserveTokens, settleSystem } from '../services/token.service.js';
 import { ASPECTS, keyframePrompt, motionPrompt, NEGATIVE_LIP_SYNC, negativePrompt, SHOT_IDS, type PromptInput, type Shot } from '../studio/cinema.js';
 import { lipSyncInput, vocalStem } from '../studio/lipsync.js';
+import { animationRequest } from '../studio/videoModels.js';
 import { parse } from '../studio/director.js';
 import * as fal from '../studio/fal.js';
 import { conformImage, downloadUrl, thumbnail } from '../studio/files.js';
@@ -915,13 +916,8 @@ async function runPrologue(
         if (speaking && duration.seconds < shot.voiceSec! + SPEECH_LEAD + 0.2) {
           throw new Error(`Shot ${index + 1}: the line takes ${shot.voiceSec!.toFixed(1)} s, longer than the longest clip the video model makes (${duration.seconds} s). Shorten the line or split it over two shots.`);
         }
-        const result = await run(model.endpoint, {
-          ...model.extra,
-          prompt: motionPrompt(input),
-          negative_prompt: direction.negative,
-          ...(duration.param ? { duration: duration.param } : {}),
-          ...(frameUrl ? { image_url: frameUrl } : { aspect_ratio: size.model }),
-        });
+        // Each video model's own request shape (Seedance has no negative prompt, for one).
+        const result = await run(model.endpoint, animationRequest(model, { prompt: motionPrompt(input), negative: direction.negative, duration: duration.param, imageUrl: frameUrl, aspect: size.model }));
         await spend(Math.ceil(duration.seconds) * costs.videoPerSecond);
         if (frameKey) await deleteObject(frameKey).catch(() => undefined);
         await downloadUrl(fal.outputUrl(result, 'video'), clipFile);

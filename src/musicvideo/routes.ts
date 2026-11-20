@@ -338,7 +338,7 @@ musicVideoRouter.put('/:projectId/characters/:characterId/me', validate({ params
   const { workspaceId, projectId, characterId } = p(res, characterParams);
   return { project: await director.setCharacterMe(requireAuth(req), workspaceId, projectId, characterId, validBody(req, meSchema).on, req.ip ?? null) };
 }));
-const optionsSchema = z.strictObject({ creativeMode: z.boolean().optional(), subtitles: z.boolean().optional(), foley: z.boolean().optional(), autoApprove: z.boolean().optional() });
+const optionsSchema = z.strictObject({ creativeMode: z.boolean().optional(), cameraEnergy: z.enum(['natural', 'bold', 'wild']).optional(), subtitles: z.boolean().optional(), foley: z.boolean().optional(), autoApprove: z.boolean().optional() });
 musicVideoRouter.put('/:projectId/options', validate({ params: projectParams, body: optionsSchema }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);
   return { project: await director.setOptions(requireAuth(req), workspaceId, projectId, validBody(req, optionsSchema)) };

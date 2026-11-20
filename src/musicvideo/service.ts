@@ -80,6 +80,7 @@ interface MvRow {
   audioAnalysis: Record<string, AudioAnalysis>;
   autoMode: boolean;
   creativeMode: boolean;
+  cameraEnergy: 'natural' | 'bold' | 'wild';
   subtitles: boolean;
   foley: boolean;
   autoApprove: boolean;
@@ -190,7 +191,7 @@ async function characterView(character: CharacterRow, assets: Map<string, AssetR
  */
 const MV_VIEW_COLUMNS = [
   'project_id', 'workspace_id', 'genre', 'vision', 'mood', 'lead_act', 'stage', 'approvals', 'original_song_id', 'audio_edits', 'mix_rendered_at',
-  'loudness_lufs', 'lyrics', 'auto_mode', 'auto_by', 'created_at', 'updated_at', 'artist_name', 'lyrics_job', 'polish', 'sequence', 'creative_mode',
+  'loudness_lufs', 'lyrics', 'auto_mode', 'auto_by', 'created_at', 'updated_at', 'artist_name', 'lyrics_job', 'polish', 'sequence', 'creative_mode', 'camera_energy',
   'subtitles', 'foley', 'auto_approve', 'titles', 'direction',
 ];
 
@@ -238,7 +239,7 @@ export async function view(auth: AuthContext, workspaceId: string, projectId: st
           ? { ...mv.lyricsJob, status: 'FAILED' as const, error: 'Transcription was interrupted (the server restarted). Run it again.' }
           : mv.lyricsJob,
       autoMode: mv.autoMode,
-      options: { creativeMode: mv.creativeMode, subtitles: mv.subtitles, foley: mv.foley, autoApprove: mv.autoApprove },
+      options: { creativeMode: mv.creativeMode, cameraEnergy: mv.cameraEnergy ?? 'bold', subtitles: mv.subtitles, foley: mv.foley, autoApprove: mv.autoApprove },
       polish: mv.polish,
       sequence: mv.sequence,
       effects: await Promise.all(
@@ -355,12 +356,12 @@ export async function setOptions(
   auth: AuthContext,
   workspaceId: string,
   projectId: string,
-  input: { creativeMode?: boolean | undefined; subtitles?: boolean | undefined; foley?: boolean | undefined; autoApprove?: boolean | undefined },
+  input: { creativeMode?: boolean | undefined; cameraEnergy?: 'natural' | 'bold' | 'wild' | undefined; subtitles?: boolean | undefined; foley?: boolean | undefined; autoApprove?: boolean | undefined },
 ) {
   await access(auth, workspaceId, true);
   await load(workspaceId, projectId);
   await sql`
-    UPDATE mv_projects SET creative_mode = COALESCE(${input.creativeMode ?? null}::boolean, creative_mode), subtitles = COALESCE(${input.subtitles ?? null}::boolean, subtitles),
+    UPDATE mv_projects SET creative_mode = COALESCE(${input.creativeMode ?? null}::boolean, creative_mode), camera_energy = COALESCE(${input.cameraEnergy ?? null}::varchar, camera_energy), subtitles = COALESCE(${input.subtitles ?? null}::boolean, subtitles),
       foley = COALESCE(${input.foley ?? null}::boolean, foley), auto_approve = COALESCE(${input.autoApprove ?? null}::boolean, auto_approve), updated_at = now()
     WHERE project_id = ${projectId}`;
   if (input.autoApprove) await autoApprove(projectId);
@@ -1077,6 +1078,7 @@ export async function directorContext(project: ProjectRow, mv: MvRow, withSongMa
     mood: mv.mood,
     leadAct: mv.leadAct,
     creativeMode: mv.creativeMode,
+    cameraEnergy: mv.cameraEnergy ?? 'bold',
     aspect: project.aspect,
     // The video runs from songStart to the end of the (edited) song.
     songSeconds: music[0]?.meta.durationSec ? Math.max(1, music[0].meta.durationSec - Math.max(0, project.brief.songStart ?? 0)) : null,
@@ -1579,7 +1581,7 @@ export async function shoot(auth: AuthContext, workspaceId: string, projectId: s
 export async function approveShot(auth: AuthContext, workspaceId: string, projectId: string, sceneId: string) {
   await access(auth, workspaceId, true);
   const { mv } = await load(workspaceId, projectId);
-  assertStage(mv, 'SHOOT');
+  assertStage(mv, 'STORYBOARD', 'SHOOT');
   const [scene] = await sql<(SceneRow & { takeStatus: string | null })[]>`
     SELECT s.*, t.status AS take_status FROM studio_scenes s LEFT JOIN studio_takes t ON t.id = s.selected_take_id
     WHERE s.id = ${sceneId} AND s.project_id = ${projectId}`;
@@ -1597,7 +1599,7 @@ export async function approveShot(auth: AuthContext, workspaceId: string, projec
 export async function autoShoot(auth: AuthContext, workspaceId: string, projectId: string, dryRun: boolean) {
   await access(auth, workspaceId, true);
   const { mv } = await load(workspaceId, projectId);
-  assertStage(mv, 'SHOOT');
+  assertStage(mv, 'STORYBOARD', 'SHOOT');
   const remaining = (await loadScenes(projectId)).filter((scene) => scene.approvedAt && !scene.shotApprovedAt);
   if (remaining.length === 0) throw AppError.badRequest('Every approved scene already has a locked shot. Approve the stage to master the film (unapproved scenes are left out).');
   // Scenes that already have a finished, picked take are approved as they are.
@@ -2170,7 +2172,7 @@ export async function stopMaster(auth: AuthContext, workspaceId: string, project
 export async function unlockShot(auth: AuthContext, workspaceId: string, projectId: string, sceneId: string) {
   await access(auth, workspaceId, true);
   const { mv } = await load(workspaceId, projectId);
-  assertStage(mv, 'SHOOT');
+  assertStage(mv, 'STORYBOARD', 'SHOOT');
   await sql`UPDATE studio_scenes SET shot_approved_at = NULL WHERE id = ${sceneId} AND project_id = ${projectId}`;
   return view(auth, workspaceId, projectId);
 }
