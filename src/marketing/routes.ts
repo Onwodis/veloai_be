@@ -16,6 +16,8 @@ import { authenticate, requireAuth } from '../middleware/authenticate.js';
 import { authorize } from '../middleware/authorize.js';
 import { validate, validBody, validParams } from '../middleware/validate.js';
 import * as marketing from './service.js';
+import * as brand from './brandLogo.js';
+import * as siteMedia from './siteMedia.js';
 
 type Handler = (req: Request, res: Response) => Promise<unknown>;
 const send = (handler: Handler) => async (req: Request, res: Response) => {
@@ -58,3 +60,32 @@ adminMarketingRouter.put('/assets/:assetId/steps/:step', validate({ params: step
   return marketing.setStepImage(assetId, step, validBody(req, stepBody).key);
 }));
 adminMarketingRouter.post('/assets/:assetId/render', validate({ params: assetParams }), send(async (_req, res) => marketing.renderTutorial(validParams(res, assetParams).assetId)));
+
+/* The site's own media: put an asset on the page it was made for (or another slot), or take it off. */
+const useBody = z.strictObject({ slotId: z.string().regex(/^[a-z0-9-]{3,120}$/).optional() });
+adminMarketingRouter.post('/assets/:assetId/use', validate({ params: assetParams, body: useBody }), send(async (req, res) => {
+  const published = await siteMedia.publishAsset(validParams(res, assetParams).assetId, validBody(req, useBody).slotId ?? null, requireAuth(req).userId);
+  return { published, studio: await marketing.studio() };
+}));
+const unuseBody = z.strictObject({ path: z.string().regex(/^\/media\/[a-z0-9/._-]{3,200}$/i) });
+adminMarketingRouter.post('/site-media/remove', validate({ body: unuseBody }), send(async (req) => {
+  await siteMedia.unpublish(validBody(req, unuseBody).path, requireAuth(req).userId);
+  return marketing.studio();
+}));
+
+/* The platform logo: generate one, switch to it, or back to the built-in lockup (id null). */
+adminMarketingRouter.get('/brand', send(async () => brand.brandView()));
+const logoBody = z.strictObject({ brief: z.string().trim().min(3).max(600), font: z.enum(brand.LOGO_FONTS) });
+adminMarketingRouter.post('/brand/logos', validate({ body: logoBody }), send(async (req) => brand.generateLogo(requireAuth(req).userId, validBody(req, logoBody))));
+const brandUseBody = z.strictObject({ id: z.uuid().nullable() });
+adminMarketingRouter.post('/brand/use', validate({ body: brandUseBody }), send(async (req) => brand.useLogo(requireAuth(req).userId, validBody(req, brandUseBody).id)));
+const logoParams = z.strictObject({ logoId: z.uuid() });
+adminMarketingRouter.delete('/brand/logos/:logoId', validate({ params: logoParams }), send(async (req, res) => brand.deleteLogo(requireAuth(req).userId, validParams(res, logoParams).logoId)));
+
+/** GET /api/v1/public/site-media: every site slot's live image / video address, and the live logo (no sign-in). */
+export const publicSiteMediaRouter: Router = Router();
+publicSiteMediaRouter.get('/', async (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
+  const [media, logo] = await Promise.all([siteMedia.publicSiteMedia(), brand.publicLogo().catch(() => null)]);
+  res.json({ ...media, logo });
+});

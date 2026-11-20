@@ -81,6 +81,7 @@ interface MvRow {
   autoMode: boolean;
   creativeMode: boolean;
   cameraEnergy: 'natural' | 'bold' | 'wild';
+  visualStyle: 'human' | 'animated-3d' | 'anime' | 'comic' | 'clay';
   subtitles: boolean;
   foley: boolean;
   autoApprove: boolean;
@@ -191,7 +192,7 @@ async function characterView(character: CharacterRow, assets: Map<string, AssetR
  */
 const MV_VIEW_COLUMNS = [
   'project_id', 'workspace_id', 'genre', 'vision', 'mood', 'lead_act', 'stage', 'approvals', 'original_song_id', 'audio_edits', 'mix_rendered_at',
-  'loudness_lufs', 'lyrics', 'auto_mode', 'auto_by', 'created_at', 'updated_at', 'artist_name', 'lyrics_job', 'polish', 'sequence', 'creative_mode', 'camera_energy',
+  'loudness_lufs', 'lyrics', 'auto_mode', 'auto_by', 'created_at', 'updated_at', 'artist_name', 'lyrics_job', 'polish', 'sequence', 'creative_mode', 'camera_energy', 'visual_style',
   'subtitles', 'foley', 'auto_approve', 'titles', 'direction',
 ];
 
@@ -239,7 +240,7 @@ export async function view(auth: AuthContext, workspaceId: string, projectId: st
           ? { ...mv.lyricsJob, status: 'FAILED' as const, error: 'Transcription was interrupted (the server restarted). Run it again.' }
           : mv.lyricsJob,
       autoMode: mv.autoMode,
-      options: { creativeMode: mv.creativeMode, cameraEnergy: mv.cameraEnergy ?? 'bold', subtitles: mv.subtitles, foley: mv.foley, autoApprove: mv.autoApprove },
+      options: { creativeMode: mv.creativeMode, cameraEnergy: mv.cameraEnergy ?? 'bold', visualStyle: mv.visualStyle ?? 'human', subtitles: mv.subtitles, foley: mv.foley, autoApprove: mv.autoApprove },
       polish: mv.polish,
       sequence: mv.sequence,
       effects: await Promise.all(
@@ -318,9 +319,9 @@ export async function list(
 
 /* ------------------------------------------------------------------ create + song */
 
-export async function create(auth: AuthContext, workspaceId: string, input: { title: string; artistName: string; aspect: '16:9' | '9:16' | '1:1'; category: ProjectCategory }) {
+export async function create(auth: AuthContext, workspaceId: string, input: { title: string; artistName: string; aspect: '16:9' | '9:16' | '1:1'; category: ProjectCategory; visualStyle?: 'human' | 'animated-3d' | 'anime' | 'comic' | 'clay' | undefined }) {
   const project = await studio.createProject(auth, workspaceId, { kind: 'MUSIC_VIDEO', category: input.category, title: input.title, aspect: input.aspect, brief: {} });
-  await sql`INSERT INTO mv_projects (project_id, workspace_id, artist_name) VALUES (${project.id}, ${workspaceId}, ${input.artistName}) ON CONFLICT DO NOTHING`;
+  await sql`INSERT INTO mv_projects (project_id, workspace_id, artist_name, visual_style) VALUES (${project.id}, ${workspaceId}, ${input.artistName}, ${input.visualStyle ?? 'human'}) ON CONFLICT DO NOTHING`;
   return view(auth, workspaceId, project.id);
 }
 
@@ -356,12 +357,12 @@ export async function setOptions(
   auth: AuthContext,
   workspaceId: string,
   projectId: string,
-  input: { creativeMode?: boolean | undefined; cameraEnergy?: 'natural' | 'bold' | 'wild' | undefined; subtitles?: boolean | undefined; foley?: boolean | undefined; autoApprove?: boolean | undefined },
+  input: { creativeMode?: boolean | undefined; cameraEnergy?: 'natural' | 'bold' | 'wild' | undefined; visualStyle?: 'human' | 'animated-3d' | 'anime' | 'comic' | 'clay' | undefined; subtitles?: boolean | undefined; foley?: boolean | undefined; autoApprove?: boolean | undefined },
 ) {
   await access(auth, workspaceId, true);
   await load(workspaceId, projectId);
   await sql`
-    UPDATE mv_projects SET creative_mode = COALESCE(${input.creativeMode ?? null}::boolean, creative_mode), camera_energy = COALESCE(${input.cameraEnergy ?? null}::varchar, camera_energy), subtitles = COALESCE(${input.subtitles ?? null}::boolean, subtitles),
+    UPDATE mv_projects SET creative_mode = COALESCE(${input.creativeMode ?? null}::boolean, creative_mode), camera_energy = COALESCE(${input.cameraEnergy ?? null}::varchar, camera_energy), visual_style = COALESCE(${input.visualStyle ?? null}::varchar, visual_style), subtitles = COALESCE(${input.subtitles ?? null}::boolean, subtitles),
       foley = COALESCE(${input.foley ?? null}::boolean, foley), auto_approve = COALESCE(${input.autoApprove ?? null}::boolean, auto_approve), updated_at = now()
     WHERE project_id = ${projectId}`;
   if (input.autoApprove) await autoApprove(projectId);
@@ -1079,6 +1080,7 @@ export async function directorContext(project: ProjectRow, mv: MvRow, withSongMa
     leadAct: mv.leadAct,
     creativeMode: mv.creativeMode,
     cameraEnergy: mv.cameraEnergy ?? 'bold',
+    visualStyle: mv.visualStyle ?? 'human',
     aspect: project.aspect,
     // The video runs from songStart to the end of the (edited) song.
     songSeconds: music[0]?.meta.durationSec ? Math.max(1, music[0].meta.durationSec - Math.max(0, project.brief.songStart ?? 0)) : null,

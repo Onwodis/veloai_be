@@ -16,7 +16,7 @@ import { env } from './config/env.js';
 import { paystackWebhook } from './controllers/token.controller.js';
 import { activityLog } from './middleware/activityLog.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
-import { globalLimiter } from './middleware/rateLimit.js';
+import { globalLimiter, userLimiter } from './middleware/rateLimit.js';
 import { corsPolicy, securityHeaders } from './middleware/security.js';
 import { apiRouter, healthRouter } from './routes/index.js';
 import { newId } from './utils/crypto.js';
@@ -91,7 +91,7 @@ export function createApp(): Express {
     })().catch(next);
   });
 
-  app.use(globalLimiter);
+  app.use(globalLimiter, userLimiter);
   // Paystack signs the exact request bytes, so this route needs the raw body
   // and must be registered before the JSON parser.
   app.post('/api/v1/payments/paystack/webhook', express.raw({ type: 'application/json', limit: '1mb' }), paystackWebhook);

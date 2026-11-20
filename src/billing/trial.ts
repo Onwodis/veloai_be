@@ -12,6 +12,7 @@
 import { z } from 'zod';
 import { prisma } from '../config/database.js';
 import type { AuthContext } from '../middleware/authenticate.js';
+import { requireVerifiedEmail } from '../services/emailVerification.service.js';
 import { applyEntry, getWallet } from '../services/token.service.js';
 import { json, sql } from '../studio/sql.js';
 import { AppError } from '../utils/AppError.js';
@@ -83,6 +84,8 @@ export async function trialStatus(userId: string) {
 export async function claimTrial(auth: AuthContext, workspaceId: string) {
   const settings = await getTrialSettings();
   if (!settings.enabled) throw AppError.forbidden('Trials are switched off right now.');
+  // Free tokens wait for a verified address (no farming with throwaway accounts).
+  await requireVerifiedEmail(auth.userId, 'claim your free trial');
   const [member] = await sql<{ role: string }[]>`SELECT role FROM workspace_members WHERE workspace_id = ${workspaceId} AND user_id = ${auth.userId}`;
   if (member?.role !== 'OWNER') throw AppError.forbidden('Claim the trial in a workspace you own.');
   const expiresAt = new Date(Date.now() + settings.days * 86_400_000);

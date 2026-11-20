@@ -29,10 +29,11 @@
  */
 import { Router } from 'express';
 import * as auth from '../controllers/auth.controller.js';
-import { authenticate, optionalAuthenticate } from '../middleware/authenticate.js';
-import { loginLimiter, mfaLimiter, recoveryLimiter, refreshLimiter, registerLimiter } from '../middleware/rateLimit.js';
+import { authenticate, optionalAuthenticate, requireAuth } from '../middleware/authenticate.js';
+import { loginAccountLimiter, loginLimiter, mfaLimiter, recoveryLimiter, refreshLimiter, registerLimiter } from '../middleware/rateLimit.js';
 import { requireCsrfHeader } from '../middleware/security.js';
-import { validate } from '../middleware/validate.js';
+import { validate, validBody } from '../middleware/validate.js';
+import * as emailVerification from '../services/emailVerification.service.js';
 import {
   emailTokenSchema,
   forgotPasswordSchema,
@@ -49,7 +50,7 @@ import {
 export const authRouter: Router = Router();
 
 authRouter.post('/register', registerLimiter, validate({ body: registerSchema }), auth.register);
-authRouter.post('/login', loginLimiter, validate({ body: loginSchema }), auth.login);
+authRouter.post('/login', loginLimiter, validate({ body: loginSchema }), loginAccountLimiter, auth.login);
 
 authRouter.post('/mfa/setup', mfaLimiter, validate({ body: mfaChallengeSchema }), auth.mfaSetup);
 authRouter.post('/mfa/enroll', mfaLimiter, validate({ body: mfaCodeSchema }), auth.mfaEnroll);
@@ -66,6 +67,19 @@ authRouter.post('/refresh', refreshLimiter, requireCsrfHeader, auth.refresh);
 authRouter.post('/logout', requireCsrfHeader, optionalAuthenticate, auth.logout);
 
 authRouter.get('/me', authenticate, auth.me);
+
+/* Email verification (services/emailVerification.service.ts): the welcome tokens and the trial wait for it. */
+authRouter.post('/email/verify', recoveryLimiter, validate({ body: emailTokenSchema }), async (req, res) => {
+  res.json(await emailVerification.verifyEmail(validBody(req, emailTokenSchema).token));
+});
+authRouter.get('/email/status', authenticate, async (req, res) => {
+  res.json(await emailVerification.verificationStatus(requireAuth(req).userId));
+});
+authRouter.post('/email/resend', recoveryLimiter, authenticate, async (req, res) => {
+  const userId = requireAuth(req).userId;
+  await emailVerification.sendVerification(userId);
+  res.json(await emailVerification.verificationStatus(userId));
+});
 authRouter.get('/sessions', authenticate, auth.listSessions);
 authRouter.post('/sessions/revoke-others', authenticate, auth.revokeOtherSessions);
 authRouter.delete(

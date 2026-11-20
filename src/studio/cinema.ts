@@ -108,13 +108,47 @@ export const STABILITY =
   'When the head or body turns, the face stays the same person from every angle: stable jaw, ears, hairline, teeth and eyes, no smearing, no warping, no flicker; ' +
   'turns are unhurried and anatomically natural, hands stay five-fingered and solid.';
 
-export const NEGATIVE =
-  'cgi, 3d render, video game, cartoon, anime, illustration, painting, plastic skin, waxy skin, airbrushed, over-smoothed, beauty filter, porcelain skin, perfect symmetrical face, glamour retouch, ' +
-  'uncanny, distorted face, asymmetrical eyes, extra fingers, fused fingers, deformed hands, extra limbs, morphing, warping, melting, face smearing during head turn, warped profile, ' +
+/** Live action only: everything that would make it look drawn, rendered or retouched. */
+const NEGATIVE_NOT_REAL =
+  'cgi, 3d render, video game, cartoon, anime, illustration, painting, plastic skin, waxy skin, airbrushed, over-smoothed, beauty filter, porcelain skin, perfect symmetrical face, glamour retouch, uncanny, ';
+/** Every look: the failure modes of generated video. */
+const NEGATIVE_ARTIFACTS =
+  'distorted face, asymmetrical eyes, extra fingers, fused fingers, deformed hands, extra limbs, morphing, warping, melting, face smearing during head turn, warped profile, ' +
   'flickering teeth, blurry mouth, mouth artifacts, rubbery lips, flicker, jitter, identity drift, face swap artifacts, text, subtitles, watermark, logo, ' +
   'oversaturated, overexposed, heavy bloom, glowing light, lens flare overload, excessive haze, neon overload, teal-orange grade, HDR look, blurry, low quality, ' +
-  'static background, frozen background, still crowd, mannequin, stiff fabric, painted-on clothes, plastic clothing, ai-generated look, epic cinematic look, ' +
-  'whip pan, crash zoom, dutch angle, spinning camera, slow-motion when not asked, floaty movement, sliding feet';
+  'static background, frozen background, still crowd, mannequin, stiff fabric, painted-on clothes, plastic clothing, ai-generated look, epic cinematic look, ';
+/** Natural camera energy only: bold / wild energy asks for exactly these moves. */
+const NEGATIVE_TAME_CAMERA = 'whip pan, crash zoom, dutch angle, spinning camera, ';
+const NEGATIVE_MOTION = 'slow-motion when not asked, floaty movement, sliding feet';
+
+export const NEGATIVE = NEGATIVE_NOT_REAL + NEGATIVE_ARTIFACTS + NEGATIVE_TAME_CAMERA + NEGATIVE_MOTION;
+
+/**
+ * The look of the whole video, chosen when a project starts: real people (live action, the
+ * realism rules above) or an animated style, where the cast stay recognisable as characters.
+ */
+export const VISUAL_STYLES = {
+  human: { label: 'Real people (live action)', look: '' },
+  'animated-3d': {
+    label: '3D animated film',
+    look: 'Stylised 3D animated feature-film look: appealing characters with slightly exaggerated, expressive proportions, smooth sculpted forms, soft global illumination and warm rim light, rich saturated colour, detailed stylised sets.',
+  },
+  anime: {
+    label: 'Anime',
+    look: 'Hand-drawn anime look: clean confident line art, cel shading with soft gradients, expressive eyes, richly painted backgrounds, dynamic composition, the polish of a high-end animated film.',
+  },
+  comic: {
+    label: 'Comic book',
+    look: 'Comic-book look: bold ink outlines, halftone shading, flat punchy blocks of colour, dramatic graphic framing, kinetic and stylised.',
+  },
+  clay: {
+    label: 'Clay animation',
+    look: 'Stop-motion clay animation look: handmade plasticine characters and miniature sets with visible fingerprints and texture, miniature lighting, charming tactile imperfection.',
+  },
+} as const;
+export type VisualStyle = keyof typeof VISUAL_STYLES;
+export const VISUAL_STYLE_IDS = Object.keys(VISUAL_STYLES) as [VisualStyle, ...VisualStyle[]];
+const animated = (visual: VisualStyle | undefined): boolean => Boolean(visual && visual !== 'human');
 
 /**
  * Lip-synced shots: what kills the performance. A frozen face or a mouth that
@@ -124,8 +158,13 @@ export const NEGATIVE =
  */
 export const NEGATIVE_LIP_SYNC = 'frozen face, expressionless face, botox face, static mouth, clenched jaw, exaggerated mouth shapes, shouting, mouth covered, ';
 
-export function negativePrompt(lipSync: boolean): string {
-  return lipSync ? NEGATIVE_LIP_SYNC + NEGATIVE : NEGATIVE;
+/**
+ * What to keep out. Animated looks drop the "not drawn / not rendered" list; bold and wild camera
+ * energy drop the bans on the very moves they ask for (whip pans, crash zooms, dutch angles).
+ */
+export function negativePrompt(lipSync: boolean, options: { energy?: CameraEnergy | undefined; visual?: VisualStyle | undefined } = {}): string {
+  const base = (animated(options.visual) ? '' : NEGATIVE_NOT_REAL) + NEGATIVE_ARTIFACTS + (options.energy && options.energy !== 'natural' ? '' : NEGATIVE_TAME_CAMERA) + NEGATIVE_MOTION;
+  return lipSync ? NEGATIVE_LIP_SYNC + base : base;
 }
 
 /**
@@ -183,6 +222,8 @@ export interface PromptInput {
   energy?: CameraEnergy | undefined;
   /** The video's opening shot: built to stop the scroll (HOOK). */
   hook?: boolean | undefined;
+  /** The video's look: real people (default) or an animated style (VISUAL_STYLES). */
+  visual?: VisualStyle | undefined;
   /** Music video: real-world music-video performance standard. */
   musicVideo?: boolean | undefined;
   /** Lip-synced shot: the subject sings these words to the song. */
@@ -314,12 +355,16 @@ const placeLine = (place: string | undefined): string => (place ? `Cast and plac
 
 /** Prompt for the identity-locked still (keyframe) of the scene's first frame. */
 export function keyframePrompt(input: PromptInput): string {
+  const drawn = animated(input.visual);
+  const look = drawn ? VISUAL_STYLES[input.visual!].look : '';
   return fitParts([
-    { text: 'Create a single photorealistic film still: the first frame of this shot.', keep: 0 },
+    { text: drawn ? `Create a single frame of an animated film, the first frame of this shot, in this look: ${look}` : 'Create a single photorealistic film still: the first frame of this shot.', keep: 0 },
     {
       text: input.featuresSubject
-        ? 'The person in the reference photos is the subject and must be instantly recognisable as that exact person: same face shape, eyes, nose, lips, jawline, skin tone and skin texture, hairline, hair, body frame, height and proportions. ' +
-          'Where the reference photos differ, trust the most natural, unfiltered, least retouched photo for the face and skin. Do not beautify, smooth, slim, age or idealise them; keep every real imperfection (pores, marks, moles, asymmetry, uneven tone).'
+        ? drawn
+          ? 'The person in the reference photos is the subject, drawn as a character in this style yet instantly recognisable as that exact person: same face shape, eyes, nose, lips, jawline, skin tone, hairline, hair, body frame and signature features, translated into the style.'
+          : 'The person in the reference photos is the subject and must be instantly recognisable as that exact person: same face shape, eyes, nose, lips, jawline, skin tone and skin texture, hairline, hair, body frame, height and proportions. ' +
+            'Where the reference photos differ, trust the most natural, unfiltered, least retouched photo for the face and skin. Do not beautify, smooth, slim, age or idealise them; keep every real imperfection (pores, marks, moles, asymmetry, uneven tone).'
         : '',
       keep: 0,
     },
@@ -345,8 +390,10 @@ export function keyframePrompt(input: PromptInput): string {
     },
     { text: `Frame for a ${input.aspect} aspect ratio.`, keep: 0 },
     {
-      text: 'Looks like an untouched frame from real footage: natural available light, true colour, real lens falloff, realistic skin with pores and small blemishes, flyaway hairs, real fabric with creases and lint, an ordinary lived-in background, no retouching, no glow, no text or logos.',
-      keep: 1,
+      text: drawn
+        ? 'The whole frame in that one consistent animated style (characters, sets and light alike), clean and polished, no text or logos.'
+        : 'Looks like an untouched frame from real footage: natural available light, true colour, real lens falloff, realistic skin with pores and small blemishes, flyaway hairs, real fabric with creases and lint, an ordinary lived-in background, no retouching, no glow, no text or logos.',
+      keep: drawn ? 0 : 1,
     },
   ]);
 }
@@ -431,6 +478,11 @@ export const CAMERA_ENERGY = {
     'that dance with the artist and hit the beat, foreground objects wiping across the lens; every frame bold and graphic, yet real lenses, real physics, real light and real people.',
 } as const;
 export type CameraEnergy = keyof typeof CAMERA_ENERGY;
+
+/** Bold / wild energy on a lip-synced shot: attitude in the framing, never in a moving, blurred face. */
+export const FACE_SAFE_ENERGY =
+  'Performance with attitude: a striking angle (low, tilted or tight) and a confident slow push or drift, the artist owning the lens; ' +
+  'the face stays large, steady and sharp for the whole shot, no fast moves, no motion blur on the face.';
 export const CAMERA_ENERGY_IDS = Object.keys(CAMERA_ENERGY) as [CameraEnergy, ...CameraEnergy[]];
 
 /** The opening shot: it has one second to stop a viewer scrolling. */
@@ -488,7 +540,8 @@ export function motionPrompt(input: PromptInput): string {
   return fitParts([
     { text: input.references ?? '', keep: 0 },
     { text: `${SHOTS[input.shot]}.`, keep: 0 },
-    { text: CAMERA_LANGUAGE[input.shot] ?? '', keep: 5 },
+    // A kinetic shot IS its camera move: its precise lens and move language outlasts the boilerplate.
+    { text: CAMERA_LANGUAGE[input.shot] ?? '', keep: KINETIC_SHOTS.has(input.shot) || input.energy === 'wild' ? 10 : 5 },
     { text: clampText(scene, 900), keep: 0, scene: true },
     { text: input.style ? `Mood and look: ${clampText(input.style, 200)}.` : '', keep: 0 },
     {
@@ -530,16 +583,23 @@ export function motionPrompt(input: PromptInput): string {
       keep: 9,
     },
     { text: input.featuresSubject ? STABILITY : '', keep: 8 },
-    { text: REALISM, keep: 7 },
+    // Animated looks: the style replaces the live-action realism (and must never be trimmed away).
+    {
+      text: animated(input.visual)
+        ? `${VISUAL_STYLES[input.visual!].look} Every frame keeps that one style; characters stay recognisable as the people in the references, with believable weight and acting.`
+        : REALISM,
+      keep: animated(input.visual) ? 0 : 7,
+    },
     { text: rhythmLine(input.rhythm, input.scene), keep: 6 },
     { text: placeLine(input.place), keep: 6 },
     { text: input.musicVideo ? SHORT_FILM : '', keep: 4 },
     { text: LIFE, keep: 3 },
     { text: input.creative && !input.energy ? CREATIVE_CAMERA : '', keep: 2 },
     // The camera's energy outranks the realism boilerplate: it is what makes the shot.
-    { text: input.energy ? CAMERA_ENERGY[input.energy] : '', keep: 8 },
+    // Lip-synced shots get the energy in a face-safe form: the mouth has to stay sharp for the sync.
+    { text: input.energy && input.energy !== 'natural' ? (input.lipSync ? FACE_SAFE_ENERGY : CAMERA_ENERGY[input.energy]) : '', keep: 8 },
     { text: input.hook ? HOOK : '', keep: 0 },
     { text: 'One continuous shot, no cuts, no morphing.', keep: 0 },
-    { text: GRADE, keep: 1 },
+    { text: animated(input.visual) ? '' : GRADE, keep: 1 },
   ]);
 }

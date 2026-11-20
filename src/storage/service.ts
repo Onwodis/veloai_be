@@ -247,6 +247,10 @@ export async function startStorageCheckout(auth: AuthContext, packId: string) {
   if (!pack) throw AppError.badRequest('That storage pack is no longer offered.');
   const tokens = await getTokenSettings();
   const mode = tokens.paystackMode;
+  // Test mode in production: only the super admin may try the flow (no free storage for test cards).
+  if (mode === 'TEST' && env.NODE_ENV === 'production' && auth.role !== 'SUPER_ADMIN') {
+    throw new AppError(503, 'INTERNAL_ERROR', 'Storage purchases are being set up and open shortly. Please try again later.');
+  }
   const [user] = await sql<{ email: string }[]>`SELECT email FROM users WHERE id = ${auth.userId}`;
   if (!user) throw AppError.notFound('User');
   const reference = `${env.APP_SLUG.slice(0, 10)}_S${mode === 'LIVE' ? 'L' : 'T'}_${randomToken(12)}`.replace(/[^A-Za-z0-9_-]/g, '');

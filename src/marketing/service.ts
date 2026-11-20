@@ -34,6 +34,7 @@ import { AppError } from '../utils/AppError.js';
 import { logger } from '../utils/logger.js';
 import { platformKnowledge } from './knowledge.js';
 import { loadSlots, type Slot } from './slots.js';
+import { autoPublish, siteMediaInUse } from './siteMedia.js';
 
 type AssetKind = 'IMAGE' | 'VIDEO' | 'FLIER' | 'TUTORIAL';
 interface TutorialStep {
@@ -114,10 +115,13 @@ async function syncFromCreations(): Promise<void> {
 
 export async function studio() {
   await syncFromCreations();
-  const [slots, assets, messages] = await Promise.all([
+  // A slot with nothing on the site takes its newest finished asset right away.
+  await autoPublish().catch((error: unknown) => logger.warn({ err: error }, 'site media auto-publish failed'));
+  const [slots, assets, messages, live] = await Promise.all([
     loadSlots(),
     sql<AssetRow[]>`SELECT * FROM marketing_assets ORDER BY created_at DESC LIMIT 200`,
     sql<{ id: string; role: 'ADMIN' | 'BOT'; content: string; proposals: unknown[]; createdAt: Date }[]>`SELECT * FROM marketing_messages ORDER BY created_at DESC LIMIT 40`,
+    siteMediaInUse(),
   ]);
   const library = await Promise.all(
     assets.map(async (row) => ({ ...assetView(row), url: row.outputKey ? await readUrl(row.outputKey, `${row.title.slice(0, 60)}.${row.kind === 'VIDEO' || row.kind === 'TUTORIAL' ? 'mp4' : row.kind === 'FLIER' ? 'png' : 'png'}`) : null })),
@@ -125,9 +129,11 @@ export async function studio() {
   return {
     slots: slots.map((slot) => {
       const made = library.find((asset) => asset.slotId === slot.id);
-      return { ...slot, latest: made ? { id: made.id, status: made.status, url: made.url } : null };
+      const onSite = live[slot.path];
+      return { ...slot, latest: made ? { id: made.id, status: made.status, url: made.url } : null, live: onSite ? { assetId: onSite.assetId, at: onSite.at } : null };
     }),
-    library,
+    // Each asset says which site paths show it now.
+    library: library.map((asset) => ({ ...asset, onSite: Object.entries(live).filter(([, entry]) => entry.assetId === asset.id).map(([path]) => path) })),
     messages: messages.reverse().map((message) => ({ id: message.id, role: message.role, content: message.content, proposals: message.proposals, createdAt: message.createdAt.toISOString() })),
   };
 }

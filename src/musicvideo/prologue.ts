@@ -28,9 +28,9 @@ import { z } from 'zod';
 import { ffmpeg, mediaDuration, probe, canBurnSubtitles, subtitlesFilter } from '../media/ffmpeg.js';
 import { projectWatermarked, WATERMARK_FILE, watermarkFilters } from '../media/watermark.js';
 import type { AuthContext } from '../middleware/authenticate.js';
-import { deleteObject, downloadToFile, headObject, keys, listObjects, readUrl, uploadFile } from '../services/storage.service.js';
+import { deleteObject, deletePrefix, downloadToFile, headObject, keys, listObjects, readUrl, uploadFile } from '../services/storage.service.js';
 import { releaseSystem, reserveTokens, settleSystem } from '../services/token.service.js';
-import { ASPECTS, keyframePrompt, motionPrompt, NEGATIVE_LIP_SYNC, negativePrompt, SHOT_IDS, type PromptInput, type Shot } from '../studio/cinema.js';
+import { ASPECTS, keyframePrompt, motionPrompt, NEGATIVE_LIP_SYNC, negativePrompt, SHOT_IDS, type CameraEnergy, type PromptInput, type Shot, type VisualStyle } from '../studio/cinema.js';
 import { lipSyncInput, vocalStem } from '../studio/lipsync.js';
 import { animationRequest } from '../studio/videoModels.js';
 import { parse } from '../studio/director.js';
@@ -714,7 +714,7 @@ async function artistReference(
 const NEGATIVE_STAGING = 'extra people, crowd, stranger, person walking into frame, person leaving frame, back to camera, hidden face, absurd action, surreal, objects used the wrong way, ';
 
 /** What the video model is asked to film for a shot, and what to avoid. */
-function shotDirection(plan: ProloguePlan, shot: PlanShot, cast: CharacterRow[], speaking: boolean): { scene: string; negative: string } {
+function shotDirection(plan: ProloguePlan, shot: PlanShot, cast: CharacterRow[], speaking: boolean, look: { energy?: CameraEnergy | undefined; visual?: VisualStyle | undefined } = {}): { scene: string; negative: string } {
   const inFrame = cast.filter((person) => shot.characterIds.includes(person.id));
   const speaker = speaking ? cast.find((person) => person.id === shot.speaker) : undefined;
   const scene = [
@@ -732,7 +732,7 @@ function shotDirection(plan: ProloguePlan, shot: PlanShot, cast: CharacterRow[],
   ]
     .filter(Boolean)
     .join(' ');
-  const negative = (speaker ? NEGATIVE_LIP_SYNC : inFrame.length ? NEGATIVE_TALKING : '') + (inFrame.length ? NEGATIVE_STAGING : '') + negativePrompt(false);
+  const negative = (speaker ? NEGATIVE_LIP_SYNC : inFrame.length ? NEGATIVE_TALKING : '') + (inFrame.length ? NEGATIVE_STAGING : '') + negativePrompt(false, look);
   return { scene, negative };
 }
 
@@ -755,7 +755,9 @@ async function runPrologue(
   const { models, costs } = settings;
   const size = ASPECTS[aspect];
   const cast = await castOf(projectId);
-  const [mv] = await sql<{ direction: unknown; voice: unknown }[]>`SELECT direction, lyrics -> 'voice' AS voice FROM mv_projects WHERE project_id = ${projectId}`;
+  const [mv] = await sql<{ direction: unknown; voice: unknown; cameraEnergy: CameraEnergy | null; visualStyle: VisualStyle | null }[]>`SELECT direction, lyrics -> 'voice' AS voice, camera_energy, visual_style FROM mv_projects WHERE project_id = ${projectId}`;
+  // The cold open matches the video: the same look (live action or animated) and camera energy.
+  const filmLook = { energy: mv?.cameraEnergy ?? undefined, visual: mv?.visualStyle ?? undefined };
   const { parseDirection, placeText } = await import('./songmap.js');
   const place = mv ? placeText(parseDirection(mv.direction), (mv.voice ?? null) as Parameters<typeof placeText>[1]) : '';
   const dir = await mkdtemp(join(tmpdir(), 'mv-prologue-'));
@@ -879,7 +881,7 @@ async function runPrologue(
         await checkpoint();
         await setProgress(projectId, `Filming shot ${index + 1} of ${count}`, at(0.1));
         const people = cast.filter((character) => shot.characterIds.includes(character.id) && character.referenceKeys.length);
-        const direction = shotDirection(plan, shot, cast, speaking);
+        const direction = shotDirection(plan, shot, cast, speaking, filmLook);
         const input: PromptInput = {
           scene: direction.scene,
           shot: shot.shot as Shot,
@@ -889,6 +891,7 @@ async function runPrologue(
           aspect,
           place: place || undefined,
           musicVideo: false,
+          ...filmLook,
         };
         let frameUrl: string | null = null;
         let frameKey: string | null = null;
@@ -1113,6 +1116,39 @@ async function runPrologue(
 }
 
 /** The finished cold open for the master (null when there is none, or it is switched off). */
+/**
+ * Deletes the cold open. `filmOnly`: the plan stays (shots, lines, look) but every filmed clip,
+ * recorded line, lip sync and the finished film go, so it can be filmed afresh; otherwise all of
+ * it goes and the video plays without a cold open. Files leave the bucket either way. Refused
+ * while filming (stop it first).
+ */
+export async function deletePrologue(auth: AuthContext, workspaceId: string, projectId: string, filmOnly: boolean) {
+  await access(auth, workspaceId, true);
+  await load(workspaceId, projectId);
+  const [row] = await sql<PrologueRow[]>`SELECT * FROM mv_prologues WHERE project_id = ${projectId}`;
+  if (!row) return prologueView(auth, workspaceId, projectId);
+  if (row.status === 'FILMING' && !isStale(row)) throw AppError.conflict('The cold open is being filmed: stop it first.');
+  if (row.reservationId) await releaseSystem(row.reservationId, workspaceId).catch(() => undefined);
+  await deletePrefix(`${keys.studio(workspaceId, projectId)}/prologue/`).catch(() => 0);
+  if (filmOnly) {
+    const parsed = planSchema.safeParse(row.plan);
+    const plan = parsed.success
+      ? {
+          ...parsed.data,
+          shots: parsed.data.shots.map(({ clipKey: _c, clipFor: _cf, clipSec: _cs, voiceKey: _v, voiceFor: _vf, voiceSec: _vs, syncKey: _s, syncFor: _sf, ...shot }) => shot),
+          mixedFor: undefined,
+        }
+      : row.plan;
+    await sql`
+      UPDATE mv_prologues SET plan = ${json(plan)}, status = 'DRAFT', step = '', progress = 0, error = NULL, output_key = NULL, thumb_key = NULL, duration_sec = NULL,
+        reservation_id = NULL, spent = 0, control = 'RUN', shot_status = '{}'::jsonb, updated_at = now()
+      WHERE project_id = ${projectId}`;
+  } else {
+    await sql`DELETE FROM mv_prologues WHERE project_id = ${projectId}`;
+  }
+  return prologueView(auth, workspaceId, projectId);
+}
+
 export async function readyPrologue(projectId: string): Promise<{ key: string; seconds: number } | null> {
   const [row] = await sql<{ outputKey: string | null; durationSec: number | null; enabled: boolean; status: string }[]>`
     SELECT output_key, duration_sec, enabled, status FROM mv_prologues WHERE project_id = ${projectId}`;

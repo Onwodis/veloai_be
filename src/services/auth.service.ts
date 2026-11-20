@@ -22,6 +22,8 @@ import { getDummyHash, hashPassword, passwordNeedsRehash, verifyPassword } from 
 import { signAccessToken, signChallengeToken, signRefreshToken, verifyRefreshToken } from '../utils/tokens.js';
 import { recordSecurityEvent, type RequestMeta } from './securityEvent.service.js';
 import { recordSignupConsents } from '../privacy/service.js';
+import { startVerification } from './emailVerification.service.js';
+import { clearBackoff, failedPasswordDelay, lockAccount, secondsUntil } from './authBackoff.js';
 
 export interface SessionTokens {
   accessToken: string;
@@ -179,6 +181,8 @@ export async function register(input: RegisterInput, meta: RequestMeta): Promise
     throw error;
   }
   await recordSecurityEvent('REGISTERED', meta, user.id);
+  // The confirmation link (the welcome tokens and the trial wait for it); never blocks the sign-up.
+  void startVerification(user.id);
   return challengeFor(user);
 }
 
@@ -189,9 +193,10 @@ export async function login(input: LoginInput, meta: RequestMeta): Promise<MfaCh
   });
 
   if (!user) {
-    // Burn the same argon2 cost as a real check so timing reveals nothing.
+    // Burn the same argon2 cost as a real check so timing reveals nothing, then the same backoff.
     await verifyPassword(await getDummyHash(), input.password);
     await recordSecurityEvent('LOGIN_FAILED', meta, null, { reason: 'unknown_email' });
+    await failedPasswordDelay(input.email);
     throw new AppError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect');
   }
 
@@ -200,7 +205,7 @@ export async function login(input: LoginInput, meta: RequestMeta): Promise<MfaCh
       423,
       'ACCOUNT_LOCKED',
       'Too many failed sign-in attempts. Try again later.',
-      { retryAfter: user.lockedUntil.toISOString() },
+      { retryAfter: user.lockedUntil.toISOString(), retryAfterSeconds: secondsUntil(user.lockedUntil) },
     );
   }
 
@@ -213,18 +218,15 @@ export async function login(input: LoginInput, meta: RequestMeta): Promise<MfaCh
     });
     await recordSecurityEvent('LOGIN_FAILED', meta, user.id, { reason: 'bad_password' });
 
+    // Escalating lock: each lock in the same 24 h lasts twice as long as the last.
     if (updated.failedLoginCount >= env.LOGIN_MAX_FAILED_ATTEMPTS) {
-      await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          failedLoginCount: 0,
-          lockedUntil: new Date(Date.now() + env.LOGIN_LOCKOUT_SECONDS * 1000),
-        },
-      });
+      await lockAccount(user.id);
       await recordSecurityEvent('ACCOUNT_LOCKED', meta, user.id);
     }
+    await failedPasswordDelay(input.email);
     throw new AppError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect');
   }
+  await clearBackoff(input.email);
 
   await assertNotSuspended(user.id);
   const rehash = passwordNeedsRehash(user.passwordHash) ? await hashPassword(input.password) : null;

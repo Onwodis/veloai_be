@@ -52,13 +52,14 @@ import { z } from 'zod';
 import { categorySchema } from '../config/categories.js';
 import { authenticate, requireAuth } from '../middleware/authenticate.js';
 import { validate, validBody, validParams, validQuery } from '../middleware/validate.js';
-import { PERFORMANCE_EMOTION_IDS, SHOT_IDS, TRANSITION_IDS } from '../studio/cinema.js';
+import { PERFORMANCE_EMOTION_IDS, SHOT_IDS, TRANSITION_IDS, VISUAL_STYLE_IDS } from '../studio/cinema.js';
 import { finishSchema } from '../studio/schemas.js';
 import { titleCase } from '../utils/names.js';
 import * as characterLook from './characterLook.js';
 import * as photos from './photos.js';
 import * as quickClip from './quickClip.js';
 import * as prologue from './prologue.js';
+import * as god from './godMode.js';
 import * as remix from './remix.js';
 import * as sceneTools from './sceneTools.js';
 import * as director from './service.js';
@@ -84,6 +85,8 @@ const createSchema = z.strictObject({
   aspect: ASPECT.default('16:9'),
   /** Industry focus: chosen before the project exists (filters on the projects page). */
   category: categorySchema,
+  /** The look, chosen at the start: real people or an animated style (changeable later in the options). */
+  visualStyle: z.enum(VISUAL_STYLE_IDS).default('human'),
 });
 /** Projects page filters: category, whose work, and the order. */
 const listQuery = z.strictObject({
@@ -338,7 +341,7 @@ musicVideoRouter.put('/:projectId/characters/:characterId/me', validate({ params
   const { workspaceId, projectId, characterId } = p(res, characterParams);
   return { project: await director.setCharacterMe(requireAuth(req), workspaceId, projectId, characterId, validBody(req, meSchema).on, req.ip ?? null) };
 }));
-const optionsSchema = z.strictObject({ creativeMode: z.boolean().optional(), cameraEnergy: z.enum(['natural', 'bold', 'wild']).optional(), subtitles: z.boolean().optional(), foley: z.boolean().optional(), autoApprove: z.boolean().optional() });
+const optionsSchema = z.strictObject({ creativeMode: z.boolean().optional(), cameraEnergy: z.enum(['natural', 'bold', 'wild']).optional(), visualStyle: z.enum(VISUAL_STYLE_IDS).optional(), subtitles: z.boolean().optional(), foley: z.boolean().optional(), autoApprove: z.boolean().optional() });
 musicVideoRouter.put('/:projectId/options', validate({ params: projectParams, body: optionsSchema }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);
   return { project: await director.setOptions(requireAuth(req), workspaceId, projectId, validBody(req, optionsSchema)) };
@@ -443,6 +446,19 @@ musicVideoRouter.post('/:projectId/scenes/:sceneId/approve-shot', validate({ par
 musicVideoRouter.post('/:projectId/auto', validate({ params: projectParams, body: autoSchema }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);
   return director.autoShoot(requireAuth(req), workspaceId, projectId, validBody(req, autoSchema).dryRun);
+}));
+/* God mode: song + cast in, the finished video out (godMode.ts). */
+musicVideoRouter.get('/:projectId/god', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return god.startGodMode(requireAuth(req), workspaceId, projectId, true);
+}));
+musicVideoRouter.post('/:projectId/god', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return god.startGodMode(requireAuth(req), workspaceId, projectId, false);
+}));
+musicVideoRouter.post('/:projectId/god/stop', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return god.stopGodMode(requireAuth(req), workspaceId, projectId);
 }));
 musicVideoRouter.post('/:projectId/master', validate({ params: projectParams, body: masterSchema }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);
@@ -582,6 +598,12 @@ musicVideoRouter.put('/:projectId/prologue', validate({ params: projectParams, b
   const { workspaceId, projectId } = p(res, projectParams);
   const body = validBody(req, prologueSaveBody);
   return prologue.savePrologue(requireAuth(req), workspaceId, projectId, { plan: body.plan, enabled: body.enabled });
+}));
+/** Deletes the cold open (filmOnly: keeps the plan, drops every clip, line and the film). */
+const prologueDeleteBody = z.strictObject({ filmOnly: z.boolean().default(false) });
+musicVideoRouter.post('/:projectId/prologue/delete', validate({ params: projectParams, body: prologueDeleteBody }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return prologue.deletePrologue(requireAuth(req), workspaceId, projectId, validBody(req, prologueDeleteBody).filmOnly);
 }));
 const prologueControlBody = z.strictObject({ action: z.enum(['pause', 'stop']) });
 musicVideoRouter.post('/:projectId/prologue/control', validate({ params: projectParams, body: prologueControlBody }), send(async (req, res) => {

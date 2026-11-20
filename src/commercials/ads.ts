@@ -76,10 +76,15 @@ async function loadAd(workspaceId: string, projectId: string): Promise<{ project
   return { project, ad, company, product };
 }
 
+/**
+ * Work on a stage is allowed once the ad has reached it: earlier stages stay editable after they
+ * are approved (no reopening, later work kept). Only stages not reached yet are refused.
+ */
 function assertStage(ad: AdRow, ...allowed: AdStage[]): void {
-  if (allowed.includes(ad.stage)) return;
-  const ahead = AD_STAGES.indexOf(ad.stage) > AD_STAGES.indexOf(allowed[0]!);
-  throw AppError.conflict(`This belongs to “${STAGE_LABEL[allowed[0]!]}”. ${ahead ? 'Reopen that stage to change it.' : 'Approve the earlier stages first.'}`);
+  const reached = AD_STAGES.indexOf(ad.stage);
+  if (allowed.some((stage) => AD_STAGES.indexOf(stage) <= reached)) return;
+  const previous = AD_STAGES[Math.max(0, AD_STAGES.indexOf(allowed[0]!) - 1)]!;
+  throw AppError.conflict(`“${STAGE_LABEL[allowed[0]!]}” opens when “${STAGE_LABEL[previous]}” is approved.`);
 }
 
 const briefOf = (ad: AdRow): AdBrief => ({ objective: ad.objective, platform: ad.platform, lengthSec: ad.lengthSec, goal: ad.goal, callToAction: ad.callToAction, rules: ad.rules });
@@ -208,17 +213,15 @@ export async function createAd(auth: AuthContext, workspaceId: string, companyId
 export async function updateBrief(auth: AuthContext, workspaceId: string, projectId: string, input: BriefInput) {
   const { project, ad } = await loadAd(workspaceId, projectId);
   await companyAccess(auth, workspaceId, ad.companyId, true);
-  // The cast (rules.characters) is edited on the Characters stage; everything else on the brief.
-  const castOnly = ad.stage === 'CHARACTERS';
-  if (!castOnly) assertStage(ad, 'BRIEF');
-  const rules: AdRules = castOnly ? { ...ad.rules, characters: input.rules?.characters ?? ad.rules.characters } : { ...ad.rules, ...input.rules };
+  // The brief and the cast stay editable at every stage (the cast stage sends only rules.characters).
+  const rules: AdRules = { ...ad.rules, ...input.rules };
   await sql`
     UPDATE ad_projects SET
-      objective = ${castOnly ? ad.objective : (input.objective ?? ad.objective)}, platform = ${castOnly ? ad.platform : (input.platform ?? ad.platform)},
-      length_sec = ${castOnly ? ad.lengthSec : (input.lengthSec ?? ad.lengthSec)}, goal = ${castOnly ? ad.goal : (input.goal ?? ad.goal)},
-      call_to_action = ${castOnly ? ad.callToAction : (input.callToAction ?? ad.callToAction)}, rules = ${json(rules)}, updated_at = now()
+      objective = ${input.objective ?? ad.objective}, platform = ${input.platform ?? ad.platform},
+      length_sec = ${input.lengthSec ?? ad.lengthSec}, goal = ${input.goal ?? ad.goal},
+      call_to_action = ${input.callToAction ?? ad.callToAction}, rules = ${json(rules)}, updated_at = now()
     WHERE project_id = ${projectId}`;
-  if (!castOnly && (input.title || input.aspect)) {
+  if (input.title || input.aspect) {
     await sql`UPDATE studio_projects SET title = ${input.title ?? project.title}, aspect = ${input.aspect ?? project.aspect}, updated_at = now() WHERE id = ${projectId}`;
   }
   return view(auth, workspaceId, projectId);
@@ -260,7 +263,7 @@ async function checkStage(ad: AdRow): Promise<string | null> {
 export async function approveStage(auth: AuthContext, workspaceId: string, projectId: string, stage: AdStage) {
   const { ad } = await loadAd(workspaceId, projectId);
   await companyAccess(auth, workspaceId, ad.companyId, true);
-  assertStage(ad, stage);
+  if (ad.stage !== stage) throw AppError.conflict(ad.approvals[stage] ? `“${STAGE_LABEL[stage]}” is already approved.` : `“${STAGE_LABEL[stage]}” isn’t open yet.`);
   const problem = await checkStage(ad);
   if (problem) throw AppError.badRequest(problem);
   const next = AD_STAGES[Math.min(AD_STAGES.length - 1, AD_STAGES.indexOf(stage) + 1)]!;
@@ -312,22 +315,42 @@ async function writeShotList(workspaceId: string, projectId: string, ad: AdRow, 
   ]
     .filter(Boolean)
     .join('. ');
-  // Old takes of replaced scenes: running ones stop (their files go with them), finished ones' files go now.
-  const oldTakes = await studio.finishedTakeIds(projectId);
-  // Moves placed on the cast stay with their scene number across script rewrites.
-  const keptMoves = new Map(
-    (await sql<{ position: number; moves: unknown[] }[]>`SELECT position, moves FROM studio_scenes WHERE project_id = ${projectId}`).map((row) => [row.position, row.moves]),
+  const rows = script.scenes.map((scene, position) => ({
+    scene,
+    position,
+    prompt: [scene.visual, scene.camera && `Camera: ${scene.camera}`, look, scene.onScreenText && `On-screen text: "${scene.onScreenText}"`].filter(Boolean).join('. ').slice(0, 2000),
+    lyric: (scene.line ? `${scene.speaker ? `${scene.speaker}: ` : ''}${scene.line}` : '').slice(0, 300) || null,
+  }));
+  const existing = await sql<{ id: string; position: number; prompt: string; durationSec: number; lyric: string | null; moves: unknown[] }[]>`
+    SELECT id, position, prompt, duration_sec, lyric, moves FROM studio_scenes WHERE project_id = ${projectId}`;
+  // A scene whose picture, length and line are unchanged keeps its filmed takes and recorded voice
+  // (editing one scene after the shoot never throws away the others). The rest are replaced.
+  const kept = new Set(
+    existing
+      .filter((old) => {
+        const row = rows[old.position];
+        return row && row.prompt === old.prompt && Number(old.durationSec) === row.scene.seconds && row.lyric === old.lyric;
+      })
+      .map((old) => old.id),
   );
+  const replaced = existing.filter((old) => !kept.has(old.id)).map((old) => old.id);
+  // Old takes of replaced scenes: running ones stop (their files go with them), finished ones' files go now.
+  const oldTakes = replaced.length ? await studio.finishedTakeIds(projectId, replaced) : [];
+  // Moves placed on the cast stay with their scene number across script rewrites.
+  const keptMoves = new Map(existing.map((row) => [row.position, row.moves]));
+  const keptPositions = new Set(existing.filter((old) => kept.has(old.id)).map((old) => old.position));
   await sql.begin(async (tx) => {
-    await tx`UPDATE studio_takes SET status = 'CANCELED', finished_at = now() WHERE project_id = ${projectId} AND status IN ('QUEUED', 'KEYFRAME', 'ANIMATING', 'LIPSYNC', 'STORING')`;
-    await tx`DELETE FROM studio_scenes WHERE project_id = ${projectId}`;
-    for (const [position, scene] of script.scenes.entries()) {
-      const prompt = [scene.visual, scene.camera && `Camera: ${scene.camera}`, look, scene.onScreenText && `On-screen text: "${scene.onScreenText}"`].filter(Boolean).join('. ');
+    if (replaced.length) {
+      await tx`UPDATE studio_takes SET status = 'CANCELED', finished_at = now() WHERE scene_id = ANY(${replaced}::uuid[]) AND status IN ('QUEUED', 'KEYFRAME', 'ANIMATING', 'LIPSYNC', 'STORING')`;
+      await tx`DELETE FROM studio_scenes WHERE id = ANY(${replaced}::uuid[])`;
+    }
+    for (const { scene, position, prompt, lyric } of rows) {
+      if (keptPositions.has(position)) continue;
       await tx`
         INSERT INTO studio_scenes (project_id, position, kind, description, prompt, shot, transition, duration_sec, features_subject, lip_sync, lyric, moves)
-        VALUES (${projectId}, ${position}, 'STORY', ${scene.visual.slice(0, 1000)}, ${prompt.slice(0, 2000)}, 'medium', 'cut', ${scene.seconds},
+        VALUES (${projectId}, ${position}, 'STORY', ${scene.visual.slice(0, 1000)}, ${prompt}, 'medium', 'cut', ${scene.seconds},
           -- Ad cast are written characters (synthesised from the rules), not the user's likeness.
-          false, false, ${(scene.line ? `${scene.speaker ? `${scene.speaker}: ` : ''}${scene.line}` : '').slice(0, 300) || null}, ${json(keptMoves.get(position) ?? [])})`;
+          false, false, ${lyric}, ${json(keptMoves.get(position) ?? [])})`;
     }
   });
   await studio.dropTakeFiles(workspaceId, projectId, oldTakes);

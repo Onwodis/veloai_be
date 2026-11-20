@@ -41,18 +41,16 @@ const view = (wallet: { balance: number; held: number; lifetimePurchased: number
   lifetimeUsed: wallet.lifetimeUsed,
 });
 
-/** Creates the wallet on first touch, crediting the signup bonus once. */
+/**
+ * Creates the wallet on first touch, empty. The welcome tokens are granted when the owner verifies
+ * their email (services/emailVerification.service.ts), once per user, so throwaway accounts can't
+ * farm them.
+ */
 async function ensureWallet(db: Tx | typeof prisma, workspaceId: string): Promise<void> {
   const exists = await db.tokenWallet.findUnique({ where: { workspaceId }, select: { workspaceId: true } });
   if (exists) return;
-  const { signupBonus } = await getTokenSettings();
   try {
-    await db.tokenWallet.create({ data: { workspaceId, balance: signupBonus } });
-    if (signupBonus > 0) {
-      await db.tokenLedger.create({
-        data: { workspaceId, type: 'GRANT', amount: signupBonus, balanceAfter: signupBonus, note: 'Welcome tokens' },
-      });
-    }
+    await db.tokenWallet.create({ data: { workspaceId, balance: 0 } });
   } catch (error) {
     if ((error as { code?: string }).code !== 'P2002') throw error; // created concurrently
   }

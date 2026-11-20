@@ -15,7 +15,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import { env } from '../config/env.js';
-import { PERFORMANCE_EMOTION_IDS, PERFORMANCE_EMOTIONS, SHOT_IDS, SHOTS, TRANSITION_IDS } from '../studio/cinema.js';
+import { PERFORMANCE_EMOTION_IDS, PERFORMANCE_EMOTIONS, SHOT_IDS, SHOTS, TRANSITION_IDS, VISUAL_STYLES, type VisualStyle } from '../studio/cinema.js';
 import { parse, photoBlock } from '../studio/director.js';
 import { ROLE_LABEL, type CharacterRow } from './cast.js';
 import { PRO_RULES } from './songmap.js';
@@ -64,6 +64,8 @@ export interface DirectorContext {
   creativeMode?: boolean;
   /** How hard the camera works: natural / bold / wild. */
   cameraEnergy?: 'natural' | 'bold' | 'wild';
+  /** The look: real people (live action) or an animated style. */
+  visualStyle?: VisualStyle;
   characters: Pick<CharacterRow, 'id' | 'name' | 'role' | 'isArtist' | 'profile' | 'prompt' | 'costumes'>[];
   scenes: { id: string; kind: string; description: string; prompt: string | null; durationSec: number; characterIds: string[]; location: string | null; costume: string | null; mode?: string | null; lyric?: string | null }[];
   /** Sections, words per section, bar length and the artist's direction settings (songmap.ts). */
@@ -101,6 +103,9 @@ export function contextText(context: DirectorContext): string {
       'performance shots in close-up or medium close-up, face toward the lens, mouth unobstructed, the artist singing with the feeling on the whole face (brows, forehead and eye creases, cheeks), never a still, blank face; the exact mouth shapes come from lip sync afterwards, ' +
       'light from real sources, real places with real texture, story intercut with performance. Human and believable in the picture, as daring in the camera as <camera_energy> allows.</craft>',
     `<camera_energy>${CAMERA_DIRECTION[context.cameraEnergy ?? (context.creativeMode ? 'wild' : 'bold')]}</camera_energy>`,
+    context.visualStyle && context.visualStyle !== 'human'
+      ? `<visual_style>${VISUAL_STYLES[context.visualStyle].label}: ${VISUAL_STYLES[context.visualStyle].look} The whole video is animated in this one style: write every prompt for it (the live-action rules about real skin, pores, grain and available light don't apply); keep believable acting, real-world weight and the cast recognisable as characters.</visual_style>`
+      : '',
     ATTENTION,
     context.place
       ? `<cast_and_place>${context.place}. Every scene is set here and its supporting cast, extras and crowd follow this mix; characters cast from photos keep their own looks. Write locations, extras and wardrobe that are true to this place.</cast_and_place>`

@@ -42,6 +42,17 @@ export function passwordResetMail(url: string): RenderedMail {
   };
 }
 
+export function verifyEmailMail(url: string, bonus: number): RenderedMail {
+  const intro = `Confirm this is your email address to finish setting up your ${env.APP_NAME} account${bonus > 0 ? ` and get your ${bonus.toLocaleString('en')} welcome tokens` : ''}. The link expires in 48 hours.`;
+  const outro = "If you didn't create this account, ignore this email.";
+  return {
+    template: 'verify_email',
+    subject: `Confirm your email for ${env.APP_NAME}`,
+    html: layout({ heading: 'Confirm your email', intro, cta: { label: 'Confirm my email', url }, outro }),
+    text: `${intro}\n\n${url}\n\n${outro}`,
+  };
+}
+
 export function mfaResetMail(url: string): RenderedMail {
   const intro = `A request was made to remove two-factor authentication from your ${env.APP_NAME} account because the authenticator app is unavailable. Confirming signs you out everywhere; you will set up a new authenticator at your next sign-in. The link expires in 30 minutes.`;
   const outro = "If you didn't ask for this, someone knows your password: ignore this email and reset your password now.";

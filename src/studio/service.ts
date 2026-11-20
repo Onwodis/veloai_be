@@ -679,8 +679,8 @@ export async function generate(auth: AuthContext, workspaceId: string, projectId
   const analysis = project.kind === 'MUSIC_VIDEO' && project.musicAssetId ? await songAnalysis(projectId, project.musicAssetId) : null;
   const [mvOptions] =
     project.kind === 'MUSIC_VIDEO'
-      ? await sql<{ creativeMode: boolean; cameraEnergy: 'natural' | 'bold' | 'wild' | null; direction: unknown; voice: Parameters<typeof placeText>[1] }[]>`
-          SELECT creative_mode, camera_energy, direction, lyrics -> 'voice' AS voice FROM mv_projects WHERE project_id = ${projectId}`
+      ? await sql<{ creativeMode: boolean; cameraEnergy: 'natural' | 'bold' | 'wild' | null; visualStyle: TakeSpec['visual'] | null; direction: unknown; voice: Parameters<typeof placeText>[1] }[]>`
+          SELECT creative_mode, camera_energy, visual_style, direction, lyrics -> 'voice' AS voice FROM mv_projects WHERE project_id = ${projectId}`
       : [];
   // Cast background + shoot location (the artist's choice, or the song's regional cue) on every shot.
   const place = mvOptions ? placeText(parseDirection(mvOptions.direction), mvOptions.voice ?? null) : '';
@@ -714,6 +714,7 @@ export async function generate(auth: AuthContext, workspaceId: string, projectId
         ...(place ? { place } : {}),
         creative: mvOptions?.creativeMode ?? false,
         energy: mvOptions?.cameraEnergy ?? 'bold',
+        visual: mvOptions?.visualStyle ?? 'human',
         // The first shot of the video is the hook: it has one second to stop the scroll.
         hook: all.indexOf(scene) === 0,
         musicVideo: true,

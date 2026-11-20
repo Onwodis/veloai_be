@@ -259,6 +259,8 @@ export interface TakeSpec {
   energy?: 'natural' | 'bold' | 'wild' | undefined;
   /** The video's opening shot: built to stop the scroll. */
   hook?: boolean | undefined;
+  /** The video's look: real people (default) or an animated style (studio/cinema.ts VISUAL_STYLES). */
+  visual?: 'human' | 'animated-3d' | 'anime' | 'comic' | 'clay' | undefined;
   /** Music videos: pop short-film performance standard in every prompt. */
   musicVideo?: boolean | undefined;
   /** @me with a trained identity model: keyframes come from the likeness model (sharper identity). */

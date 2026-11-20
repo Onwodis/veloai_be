@@ -32,6 +32,7 @@ import { issueSession, type AuthResult } from './auth.service.js';
 import { sendMail } from './mail/mail.service.js';
 import { mfaResetMail, passwordResetMail } from './mail/templates.js';
 import { recordSecurityEvent, type RequestMeta } from './securityEvent.service.js';
+import { clearSignInFailures, failedMfa, secondsUntil } from './authBackoff.js';
 
 const MAX_ATTEMPTS = 5;
 const CHALLENGE_TTL_SECONDS = 10 * 60;
@@ -51,14 +52,30 @@ async function openChallenge(token: string, stage: ChallengeClaims['stage']): Pr
   if (await redis.exists(key('used', claims.jti))) {
     throw new AppError(401, 'MFA_CHALLENGE_INVALID', 'This sign-in attempt was already used. Enter your password again.');
   }
+  // A lock (wrong passwords or too many wrong codes) stops open challenges too.
+  const user = await prisma.user.findUnique({ where: { id: claims.sub }, select: { lockedUntil: true } });
+  if (user?.lockedUntil && user.lockedUntil > new Date()) lockedError(user.lockedUntil);
   return claims;
 }
 
-/** Counts a wrong code; burns the challenge after MAX_ATTEMPTS. */
+function lockedError(until: Date): never {
+  throw new AppError(423, 'ACCOUNT_LOCKED', 'Too many failed sign-in attempts. Try again later.', { retryAfter: until.toISOString(), retryAfterSeconds: secondsUntil(until) });
+}
+
+/**
+ * Counts a wrong code; burns the challenge after MAX_ATTEMPTS. Wrong codes also count per user
+ * across challenges (with backoff), so signing in again doesn't buy fresh guesses.
+ */
 async function failAttempt(claims: ChallengeClaims, meta: RequestMeta, message: string): Promise<never> {
   const attempts = await redis.incr(key('attempts', claims.jti));
   await redis.expire(key('attempts', claims.jti), CHALLENGE_TTL_SECONDS);
   await recordSecurityEvent('MFA_FAILED', meta, claims.sub, { attempts });
+  const { locked } = await failedMfa(claims.sub);
+  if (locked) {
+    await redis.set(key('used', claims.jti), '1', 'EX', CHALLENGE_TTL_SECONDS);
+    await recordSecurityEvent('ACCOUNT_LOCKED', meta, claims.sub, { reason: 'mfa_failures' });
+    lockedError(locked);
+  }
   if (attempts >= MAX_ATTEMPTS) {
     await redis.set(key('used', claims.jti), '1', 'EX', CHALLENGE_TTL_SECONDS);
     throw new AppError(401, 'MFA_CHALLENGE_INVALID', 'Too many wrong codes. Enter your password again.');
@@ -72,6 +89,7 @@ async function consumeChallenge(claims: ChallengeClaims): Promise<void> {
   if (claimed !== 'OK') {
     throw new AppError(401, 'MFA_CHALLENGE_INVALID', 'This sign-in attempt was already used. Enter your password again.');
   }
+  await clearSignInFailures(claims.sub);
 }
 
 /* ------------------------------------------------------------------ recovery codes */

@@ -213,6 +213,7 @@ export async function runTake(takeId: string): Promise<void> {
     shot: syncing ? lipSafeShot(spec.shot) : spec.shot,
     energy: spec.energy,
     hook: spec.hook,
+    visual: spec.visual,
     style: spec.style,
     identity: spec.identityProfile,
     featuresSubject: spec.featuresSubject,
@@ -333,7 +334,7 @@ export async function runTake(takeId: string): Promise<void> {
           frameUrl: await readUrl(frameKey),
           people: await Promise.all(elements.map(async (person) => ({ name: person.name, urls: await Promise.all(person.keys.slice(0, 3).map((key) => readUrl(key))) }))),
           prompt: (references) => motionPrompt({ ...promptInput, references }),
-          negative: negativePrompt(promptInput.lipSync ?? false),
+          negative: negativePrompt(promptInput.lipSync ?? false, { energy: spec.energy, visual: spec.visual }),
           duration: duration.param,
           aspect: ASPECTS[spec.aspect].model,
           vocalUrl: vocal ? await readUrl(vocal.key) : null,
@@ -347,7 +348,7 @@ export async function runTake(takeId: string): Promise<void> {
       } else {
         input = animationRequest(model, {
           prompt: motionPrompt(promptInput),
-          negative: negativePrompt(promptInput.lipSync ?? false),
+          negative: negativePrompt(promptInput.lipSync ?? false, { energy: spec.energy, visual: spec.visual }),
           duration: duration.param,
           imageUrl: frameKey ? await readUrl(frameKey) : null,
           aspect: size.model,

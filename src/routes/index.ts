@@ -29,7 +29,7 @@ import { myShareLinksRouter, publicShareRouter, shareLinksRouter } from '../shar
 import { pushesRouter, pushPrefsRouter } from '../contributions/routes.js';
 import { adminOffersRouter, myPortraitsRouter, myTrialRouter, watermarkRouter } from '../billing/routes.js';
 import { overviewStatsRouter } from '../studio/overviewStats.js';
-import { adminMarketingRouter } from '../marketing/routes.js';
+import { adminMarketingRouter, publicSiteMediaRouter } from '../marketing/routes.js';
 import { adminDataRequestsRouter, adminKycRouter, myKycRouter, myPrivacyRouter, publicPrivacyRouter } from '../privacy/routes.js';
 import { adminSupportRouter, adminUserRouter, assetBrowserRouter, commandCenterRouter, insightsRouter, supportRouter } from '../admin360/routes.js';
 
@@ -49,6 +49,7 @@ apiRouter.use('/workspaces/:workspaceId/watermark', watermarkRouter);
 apiRouter.use('/workspaces/:workspaceId/overview-stats', overviewStatsRouter);
 apiRouter.use('/admin/offers', adminOffersRouter);
 apiRouter.use('/admin/marketing', adminMarketingRouter);
+apiRouter.use('/public/site-media', publicSiteMediaRouter);
 apiRouter.use('/me/privacy', myPrivacyRouter);
 apiRouter.use('/me/kyc', myKycRouter);
 apiRouter.use('/public/privacy', publicPrivacyRouter);

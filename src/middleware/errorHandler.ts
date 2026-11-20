@@ -98,6 +98,9 @@ export function errorHandler(error: unknown, req: Request, res: Response, _next:
       error: { code: known.code, message: hideEngine(known.message), requestId },
     };
     if (known.details !== undefined) body.error.details = known.details;
+    // Locks and limits say when to come back (RFC 9110 Retry-After, seconds).
+    const retry = (known.details as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds;
+    if ((known.statusCode === 423 || known.statusCode === 429) && typeof retry === 'number') res.setHeader('Retry-After', String(retry));
     res.status(known.statusCode).json(body);
     return;
   }

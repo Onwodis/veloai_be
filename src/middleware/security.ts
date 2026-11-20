@@ -4,7 +4,7 @@
 import cors from 'cors';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import helmet from 'helmet';
-import { env } from '../config/env.js';
+import { env, isProduction } from '../config/env.js';
 import { AppError } from '../utils/AppError.js';
 
 /**
@@ -24,7 +24,10 @@ export const securityHeaders: RequestHandler = helmet({
   strictTransportSecurity: { maxAge: 63_072_000, includeSubDomains: true, preload: true },
   frameguard: { action: 'deny' },
   referrerPolicy: { policy: 'no-referrer' },
-  crossOriginResourcePolicy: { policy: 'same-site' },
+  // Nothing the API returns is meant to be embedded by another origin. In production the site and
+  // the API share one origin (https://<domain>/api); in development they are different ports of
+  // localhost (same site, different origin), so <img>/<video> from the API still load there.
+  crossOriginResourcePolicy: { policy: isProduction ? 'same-origin' : 'same-site' },
   crossOriginOpenerPolicy: { policy: 'same-origin' },
 });
 
