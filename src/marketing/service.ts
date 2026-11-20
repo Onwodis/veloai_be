@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { createCreation } from '../creations/service.js';
-import { canBurnSubtitles, ffmpeg, filterPath, probe } from '../media/ffmpeg.js';
+import { canBurnSubtitles, ffmpeg, probe, subtitlesFilter } from '../media/ffmpeg.js';
 import { WATERMARK_FILE, watermarkAvailable } from '../media/watermark.js';
 import type { AuthContext } from '../middleware/authenticate.js';
 import { downloadToFile, headObject, presignPut, readUrl, uploadFile } from '../services/storage.service.js';
@@ -240,7 +240,7 @@ export async function composeFlier(assetId: string) {
     const out = join(dir, 'flier.png');
     const logo = await watermarkAvailable();
     const shade = `drawbox=x=0:y=ih*0.45:w=iw:h=ih*0.55:color=black@0.45:t=fill`;
-    const graph = `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},${shade},subtitles=${filterPath(ass)}[t]` + (logo ? `;[1:v]scale=${Math.round(width * 0.24)}:-1[l];[t][l]overlay=x=${margin}:y=${margin}[o]` : '');
+    const graph = `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},${shade},${subtitlesFilter(ass)}[t]` + (logo ? `;[1:v]scale=${Math.round(width * 0.24)}:-1[l];[t][l]overlay=x=${margin}:y=${margin}[o]` : '');
     await ffmpeg(['-i', background, ...(logo ? ['-i', WATERMARK_FILE] : []), '-filter_complex', graph, '-map', logo ? '[o]' : '[t]', '-frames:v', '1', out]);
     const key = `marketing/fliers/${row.id}-${randomBytes(4).toString('hex')}.png`;
     await uploadFile(key, out, 'image/png');
@@ -338,7 +338,7 @@ export async function runTutorial(assetId: string): Promise<void> {
       const segment = join(dir, `segment-${index}.mp4`);
       // Slow push-in towards the centre, like a screen-recording zoom.
       const zoom = `zoompan=z='min(1+0.10*on/${frames},1.10)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=30`;
-      const video = `[0:v]scale=${width * 2}:${height * 2}:force_original_aspect_ratio=decrease,pad=${width * 2}:${height * 2}:(ow-iw)/2:(oh-ih)/2:color=0x0b0b14,${zoom},subtitles=${filterPath(ass)},format=yuv420p[v]`;
+      const video = `[0:v]scale=${width * 2}:${height * 2}:force_original_aspect_ratio=decrease,pad=${width * 2}:${height * 2}:(ow-iw)/2:(oh-ih)/2:color=0x0b0b14,${zoom},${subtitlesFilter(ass)},format=yuv420p[v]`;
       const audio = voice ? `;[1:a]aresample=48000,aformat=channel_layouts=stereo,apad=whole_dur=${seconds.toFixed(3)}[a]` : `;anullsrc=channel_layout=stereo:sample_rate=48000,atrim=0:${seconds.toFixed(3)}[a]`;
       await ffmpeg(['-loop', '1', '-i', shot, ...(voice ? ['-i', voice] : []), '-filter_complex', video + audio, '-map', '[v]', '-map', '[a]', '-t', seconds.toFixed(3), '-r', '30', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-c:a', 'aac', '-b:a', '192k', segment]);
       segments.push(segment);

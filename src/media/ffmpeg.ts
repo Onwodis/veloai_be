@@ -4,6 +4,7 @@
  * FFMPEG_PATH / FFPROBE_PATH to use a system build (e.g. one with NVENC).
  */
 import { spawn } from 'node:child_process';
+import { resolve } from 'node:path';
 import ffmpegStatic from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
 
@@ -112,6 +113,16 @@ export function canBurnSubtitles(probeFile: string): Promise<boolean> {
 
 /** A file path quoted for use inside an ffmpeg filter graph (Windows drive colons escaped). */
 export const filterPath = (file: string): string => `'${file.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'")}'`;
+
+/**
+ * The app's bundled fonts (data/fonts: Montserrat, Bebas Neue, Cinzel… see media/textfx.ts). The
+ * runtime image has only DejaVu and Noto installed, so a title asking for any other family would
+ * silently fall back; libass is pointed at this folder instead (works in dev and in Docker alike).
+ */
+export const FONTS_DIR = resolve(process.cwd(), 'data/fonts');
+
+/** The `subtitles` filter for an .ass file, with the bundled fonts available to it. */
+export const subtitlesFilter = (assFile: string): string => `subtitles=${filterPath(assFile)}:fontsdir=${filterPath(FONTS_DIR)}`;
 
 /** Duration of any media file (audio-only included: no video stream needed). */
 export async function mediaDuration(file: string): Promise<number> {

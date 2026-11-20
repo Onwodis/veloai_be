@@ -11,12 +11,13 @@
  *               proposals apply to scenes with one click
  *   STORYBOARD  the final timeline: INTRO → story → OUTRO, timed to the song;
  *               approve each scene
- *   SHOOT       one scene at a time: generate takes, pick, approve → next scene
- *               unlocks. Or "I trust your judgement": generate, pick and stitch all
+ *   SHOOT       any scene, in any order: generate takes, pick, approve. Or "I trust your judgement": generate, pick and stitch all
  *   MASTER      the final cut, loudness-normalised (default -14 LUFS)
  *
- * A stage is edited only while it is the current stage; approving it unlocks
- * the next. Reopening a stage clears its approval and every later one.
+ * Every stage reached so far stays editable (no reopen needed to go back and
+ * change something). A later stage opens from the stage bar once the stages
+ * before it have what they need (openStage). Reopening a stage still exists
+ * to clear its approval and every later one on purpose.
  */
 import { randomUUID } from 'node:crypto';
 import type { AuthContext } from '../middleware/authenticate.js';
@@ -121,13 +122,15 @@ export async function load(workspaceId: string, projectId: string): Promise<{ pr
   return { project, mv: mv! };
 }
 
-/** Edits are allowed only on the stage being worked on (or the listed extra stages). */
+/**
+ * Edits are allowed on every stage the production has reached: the artist moves freely back
+ * and forth (changing the song, a costume or an early scene never needs a "reopen"). A stage
+ * not reached yet is opened with openStage(), which checks it has what it needs.
+ */
 export function assertStage(mv: MvRow, ...allowed: Stage[]): void {
-  if (!allowed.includes(mv.stage)) {
-    throw AppError.conflict(
-      `This is part of “${STAGE_LABEL[allowed[0]!]}”. ${STAGES.indexOf(mv.stage) > STAGES.indexOf(allowed[0]!) ? 'Reopen that stage to change it.' : 'Approve the earlier stages first.'}`,
-    );
-  }
+  const reached = STAGES.indexOf(mv.stage);
+  if (allowed.some((stage) => STAGES.indexOf(stage) <= reached)) return;
+  throw AppError.conflict(`This is part of “${STAGE_LABEL[allowed[0]!]}”, which isn't open yet: open it from the stage bar (it checks what it needs first).`);
 }
 
 export async function touch(projectId: string): Promise<void> {
@@ -1519,6 +1522,25 @@ export async function approveStage(auth: AuthContext, workspaceId: string, proje
   return view(auth, workspaceId, projectId);
 }
 
+/**
+ * Jumps to any stage. A stage already reached just opens. A later one is reached by completing
+ * each stage in between the normal way (same checks and side effects as Approve), so nothing is
+ * skipped silently; the first stage missing something stops it and says what is needed.
+ */
+export async function openStage(auth: AuthContext, workspaceId: string, projectId: string, stage: Stage) {
+  await access(auth, workspaceId, true);
+  const target = STAGES.indexOf(stage);
+  for (let guard = 0; guard < STAGES.length; guard += 1) {
+    const { project, mv } = await load(workspaceId, projectId);
+    const at = STAGES.indexOf(mv.stage);
+    if (at >= target) break;
+    const problem = await checkStage(project, mv, mv.stage);
+    if (problem) throw AppError.badRequest(`To open “${STAGE_LABEL[stage]}”, “${STAGE_LABEL[mv.stage]}” needs one more thing: ${problem}`);
+    await approveStage(auth, workspaceId, projectId, mv.stage);
+  }
+  return view(auth, workspaceId, projectId);
+}
+
 export async function reopenStage(auth: AuthContext, workspaceId: string, projectId: string, stage: Stage) {
   await access(auth, workspaceId, true);
   const { project, mv } = await load(workspaceId, projectId);
@@ -1536,24 +1558,16 @@ async function firstUnshot(projectId: string): Promise<SceneRow | undefined> {
   return (await loadScenes(projectId)).find((scene) => scene.approvedAt && !scene.shotApprovedAt);
 }
 
-const NOT_APPROVED = (scene: SceneRow): AppError =>
-  AppError.badRequest(`Scene ${scene.position + 1} is not approved: only approved scenes are generated. Approve it first (on its card, or with Approve all).`);
 
-/** Generates takes for one scene: only the next scene in order (each shot is approved before the next). */
+/** Generates takes for any scene, in any order. Generating a scene puts it in the video (approves it). */
 export async function shoot(auth: AuthContext, workspaceId: string, projectId: string, sceneId: string, takes: number, dryRun: boolean) {
   await access(auth, workspaceId, true);
   const { mv } = await load(workspaceId, projectId);
   assertStage(mv, 'SHOOT', 'STORYBOARD');
-  const next = mv.stage === 'SHOOT' ? await firstUnshot(projectId) : undefined;
   const [scene] = await sql<SceneRow[]>`SELECT * FROM studio_scenes WHERE id = ${sceneId} AND project_id = ${projectId}`;
   if (!scene) throw AppError.notFound('Scene');
-  if (!scene.approvedAt) throw NOT_APPROVED(scene);
-  // Scenes are written and generated one after the other: a scene that has never been
-  // shot waits for the scene before it; any scene already shot can be regenerated.
-  if (!scene.shotApprovedAt && next && next.id !== sceneId) {
-    const [{ count } = { count: 0 }] = await sql<{ count: number }[]>`SELECT count(*)::int AS count FROM studio_takes WHERE scene_id = ${sceneId} AND status <> 'CANCELED'`;
-    if (count === 0) throw AppError.badRequest(`Lock scene ${next.position + 1} first: new scenes are shot one after the other.`);
-  }
+  // Asking for a scene's video is the approval: no separate click, and no waiting on the scenes before it.
+  if (!scene.approvedAt && !dryRun) await sql`UPDATE studio_scenes SET approved_at = now() WHERE id = ${sceneId}`;
   // One generation per scene at a time (a second click is refused, not charged).
   if (!dryRun) await studio.assertScenesIdle(projectId, [sceneId]);
   // Re-shooting an approved scene re-opens it.

@@ -12,7 +12,7 @@
  */
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { canBurnSubtitles, ffmpeg, filterPath } from '../media/ffmpeg.js';
+import { canBurnSubtitles, ffmpeg, subtitlesFilter } from '../media/ffmpeg.js';
 import { downloadToFile } from '../services/storage.service.js';
 import { sql } from '../studio/sql.js';
 import type { EndCard } from './schemas.js';
@@ -140,7 +140,7 @@ export async function applyEndCard(
     graph.push(`${last}[logo]overlay=x=(W-w)/2:y=${y}:enable='gte(t,${from})':shortest=1[v2]`);
     last = '[v2]';
   }
-  graph.push(`${last}${text ? `subtitles=${filterPath(ass)},` : ''}format=yuv420p[vout]`);
+  graph.push(`${last}${text ? `${subtitlesFilter(ass)},` : ''}format=yuv420p[vout]`);
 
   const output = join(workDir, 'film-endcard.mp4');
   await ffmpeg(

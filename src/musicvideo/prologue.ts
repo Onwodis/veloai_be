@@ -25,7 +25,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { ffmpeg, filterPath, mediaDuration, probe, canBurnSubtitles } from '../media/ffmpeg.js';
+import { ffmpeg, mediaDuration, probe, canBurnSubtitles, subtitlesFilter } from '../media/ffmpeg.js';
 import { projectWatermarked, WATERMARK_FILE, watermarkFilters } from '../media/watermark.js';
 import type { AuthContext } from '../middleware/authenticate.js';
 import { deleteObject, downloadToFile, headObject, keys, listObjects, readUrl, uploadFile } from '../services/storage.service.js';
@@ -44,7 +44,7 @@ import { logger } from '../utils/logger.js';
 import type { CharacterRow } from './cast.js';
 import { contextText } from './director.js';
 import { access, charged, directorContext, load } from './service.js';
-import { header, revealWords } from './titles.js';
+import { assHeader, TEXT_TEMPLATE_IDS, templateStyle, textEvent, textStyleSchema, type TextStyle } from '../media/textfx.js';
 
 /* ------------------------------------------------------------------ the plan */
 
@@ -124,6 +124,9 @@ export const planSchema = z.strictObject({
   muteAll: z.boolean().optional(),
   /** What the current film was mixed from: a different value means the shots changed since. */
   mixedFor: z.string().max(64).optional(),
+  /** The on-screen text's template (media/textfx.ts; typewriter by default) and the artist's own look over it. */
+  textTemplate: z.enum(TEXT_TEMPLATE_IDS).optional(),
+  textLook: textStyleSchema.optional(),
 });
 
 type PlanShot = z.infer<typeof shotSchema>;
@@ -199,7 +202,11 @@ export const mixFor = (plan: ProloguePlan): string =>
     plan.bed,
     Boolean(plan.muteNarrator),
     Boolean(plan.muteAll),
+    textLookOf(plan),
   ]);
+
+/** The look of the cold open's on-screen text: the artist's own, else the template's (typewriter by default). */
+export const textLookOf = (plan: Pick<ProloguePlan, 'textTemplate' | 'textLook'>): TextStyle => plan.textLook ?? templateStyle(plan.textTemplate ?? 'typewriter');
 
 export const PlanSchema = z.object({
   logline: z.string().describe('One sentence: the story the cold open sets up'),
@@ -1024,13 +1031,14 @@ async function runPrologue(
 
     // On-screen text, typed in on its shot.
     const ass = join(dir, 'text.ass');
+    const look = textLookOf(plan);
     let start = 0;
     const events: string[] = [];
     for (const [index, shot] of plan.shots.entries()) {
-      if (shot.text.trim()) events.push(revealWords(shot.text.trim().toUpperCase(), start + 0.4, Math.max(1.5, lengths[index]! - 0.6)));
+      if (shot.text.trim()) events.push(textEvent({ styleName: 'Text', style: look, text: shot.text.trim(), start: start + 0.4, seconds: Math.max(1.5, lengths[index]! - 0.6), frame: size }));
       start += lengths[index]!;
     }
-    const withText = events.length > 0 && (await writeFile(ass, [...header(size, 'typewriter'), ...events, ''].join('\n'), 'utf8').then(() => canBurnSubtitles(ass).catch(() => false)));
+    const withText = events.length > 0 && (await writeFile(ass, [...assHeader(size, [{ name: 'Text', style: look }]), ...events, ''].join('\n'), 'utf8').then(() => canBurnSubtitles(ass).catch(() => false)));
 
     // Sound: the bed, the lines on top (the bed dips under the voice). Muted: no sound at all.
     await setProgress(projectId, plan.muteAll ? 'Rendering (silent)' : 'Mixing the voices', 0.92);
@@ -1063,7 +1071,7 @@ async function runPrologue(
 
     // Picture: text, a fade in from black and out to black, the watermark when the project has one.
     const watermark = await projectWatermarked(projectId);
-    const picture = [...(withText ? [`subtitles=${filterPath(ass)}`] : []), 'fade=t=in:st=0:d=0.6', `fade=t=out:st=${Math.max(0, total - 0.6).toFixed(2)}:d=0.6`, 'format=yuv420p'];
+    const picture = [...(withText ? [subtitlesFilter(ass)] : []), 'fade=t=in:st=0:d=0.6', `fade=t=out:st=${Math.max(0, total - 0.6).toFixed(2)}:d=0.6`, 'format=yuv420p'];
     graph.push(`[0:v]${picture.join(',')}[pic]`);
     let videoLabel = '[pic]';
     if (watermark) {

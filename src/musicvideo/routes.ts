@@ -36,8 +36,9 @@
  *   POST   /:projectId/scenes/lock-to-song     re-time scenes to bars + real lyrics (free)
  *   POST   /:projectId/storyboard              { sceneCount } final timeline (token-gated)   [STORYBOARD]
  *   POST   /:projectId/stages/:stage/approve   approve the current stage → next unlocks
+ *   POST   /:projectId/stages/:stage/open      jump to any stage (completes the ones in between when they're ready)
  *   POST   /:projectId/stages/:stage/reopen    go back (clears later approvals)
- *   POST   /:projectId/scenes/:sceneId/shoot   { takes, dryRun } next scene in order           [SHOOT]
+ *   POST   /:projectId/scenes/:sceneId/shoot   { takes, dryRun } any scene, any order           [SHOOT]
  *   POST   /:projectId/scenes/:sceneId/approve-shot
  *   POST   /:projectId/auto                    { dryRun } "I trust your judgement"
  *   POST   /:projectId/master                  { finish, dryRun } final cut                   [MASTER]
@@ -420,6 +421,10 @@ musicVideoRouter.post('/:projectId/storyboard', validate({ params: projectParams
 musicVideoRouter.post('/:projectId/stages/:stage/approve', validate({ params: stageParams }), send(async (req, res) => {
   const { workspaceId, projectId, stage } = p(res, stageParams);
   return { project: await director.approveStage(requireAuth(req), workspaceId, projectId, stage) };
+}));
+musicVideoRouter.post('/:projectId/stages/:stage/open', validate({ params: stageParams }), send(async (req, res) => {
+  const { workspaceId, projectId, stage } = p(res, stageParams);
+  return { project: await director.openStage(requireAuth(req), workspaceId, projectId, stage) };
 }));
 musicVideoRouter.post('/:projectId/stages/:stage/reopen', validate({ params: stageParams }), send(async (req, res) => {
   const { workspaceId, projectId, stage } = p(res, stageParams);

@@ -23,7 +23,7 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { canBurnSubtitles, ffmpeg, filterPath, probe } from '../media/ffmpeg.js';
+import { canBurnSubtitles, ffmpeg, filterPath, probe, subtitlesFilter } from '../media/ffmpeg.js';
 import { mixPieces, mixPositions, type AudioEdits } from '../musicvideo/audio.js';
 import { deleteObject, downloadToFile, headObject, keys, readUrl, uploadBuffer, uploadFile } from '../services/storage.service.js';
 import { releaseSystem, settleSystem, touchReservation } from '../services/token.service.js';
@@ -532,7 +532,7 @@ export async function runAssembly(projectId: string): Promise<void> {
     let titleFilter = '';
     if (titles?.enabled) {
       const overlay = join(workDir, 'titles.ass');
-      if ((await writeOverlayAss(titles, overlay, { width, height, total })) && (await canBurnSubtitles(overlay).catch(() => false))) titleFilter = `subtitles=${filterPath(overlay)}`;
+      if ((await writeOverlayAss(titles, overlay, { width, height, total })) && (await canBurnSubtitles(overlay).catch(() => false))) titleFilter = subtitlesFilter(overlay);
     }
     const finishing = [
       LOOKS[finish.look],
@@ -716,7 +716,7 @@ export async function runAssembly(projectId: string): Promise<void> {
               '-f', 'lavfi', '-t', seconds.toFixed(3), '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
               '-i', output,
               '-filter_complex',
-              `[0:v]subtitles=${filterPath(openingAss)}${finish.grain > 0 ? `,noise=c0s=${Math.min(finish.grain, 8)}:c0f=t+u` : ''},format=yuv420p,setsar=1[ov];` +
+              `[0:v]${subtitlesFilter(openingAss)}${finish.grain > 0 ? `,noise=c0s=${Math.min(finish.grain, 8)}:c0f=t+u` : ''},format=yuv420p,setsar=1[ov];` +
                 `[2:v]setsar=1,fade=t=in:st=0:d=0.6[fv];[2:a]aresample=48000,aformat=channel_layouts=stereo[fa];` +
                 '[ov][1:a][fv][fa]concat=n=2:v=1:a=1[v][a]',
               '-map', '[v]', '-map', '[a]', '-r', String(FPS),

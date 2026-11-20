@@ -7,35 +7,58 @@
  *   credits     "A XYZ FILMS PRODUCTION" → "XYZ RECORDS PRESENTS" →
  *               ARTIST / "SONG TITLE" (ft. …), letter-spaced, fading in and
  *               out, either over the intro footage or on black before it
- *   end credit  "Directed by …" over the last seconds
+ *   write-ups   text cards over the video at chosen moments
+ *   end credit  "Directed by …" and the publishing rights over the last seconds
  *
- * The director proposes them in the director's room; the artist edits and
- * switches them on. Rendered with libass at the master (no AI, no tokens).
+ * Every part is drawn by the text engine (media/textfx.ts): a template for the
+ * set (music intro, cinematic, neon…) and per-part tweaks (font, size, weight,
+ * colour, glow, entrance / exit animation). The director proposes them in the
+ * director's room; the artist edits and switches them on. Rendered with libass
+ * at the master with the bundled fonts (no AI, no tokens).
  */
 import { writeFile } from 'node:fs/promises';
 import { z } from 'zod';
+import { assHeader, stamp, TEXT_TEMPLATE_IDS, templateStyle, textEvent, textStyleSchema, type TextFrame, type TextStyle, type TextTemplateId } from '../media/textfx.js';
 
 export const TITLE_STYLES = ['classic', 'minimal', 'typewriter', 'bold'] as const;
 export type TitleStyle = (typeof TITLE_STYLES)[number];
 
-const line = (max: number) => z.string().trim().max(max);
+const field = (max: number) => z.string().trim().max(max);
 
 export const titlesSchema = z.strictObject({
   enabled: z.boolean(),
   /** e.g. "A Sunset Films production" */
-  presenter: line(80),
+  presenter: field(80),
   /** e.g. "Mavin Records presents" */
-  label: line(80),
-  artist: line(80),
-  song: line(80),
-  featuring: line(80),
+  label: field(80),
+  artist: field(80),
+  song: field(80),
+  featuring: field(80),
   /** End credit: "Directed by …" (empty = none). */
-  director: line(80),
+  director: field(80),
   /** Story text cards on black before the song. */
   prologue: z.array(z.strictObject({ text: z.string().trim().min(1).max(220), seconds: z.number().min(2).max(10) })).max(5),
+  /** The original four looks (kept for titles saved before templates; `template` wins when set). */
   style: z.enum(TITLE_STYLES),
   /** Credits over the intro footage, or on black before the song (after the prologue). */
   placement: z.enum(['over-intro', 'on-black']),
+  /** The text template for the whole set (media/textfx.ts): font, colours, glow, animations. */
+  template: z.enum(TEXT_TEMPLATE_IDS).optional(),
+  /** The artist's own tweaks per part (size, font, colour, entrance…), over the template. */
+  looks: z
+    .strictObject({
+      title: textStyleSchema.optional(),
+      credit: textStyleSchema.optional(),
+      story: textStyleSchema.optional(),
+      end: textStyleSchema.optional(),
+      rights: textStyleSchema.optional(),
+      writeUp: textStyleSchema.optional(),
+    })
+    .optional(),
+  /** Publishing rights / copyright lines over the last seconds ("℗ 2026 … · © 2026 …"). */
+  rights: z.string().trim().max(300).optional(),
+  /** Text cards over the video at chosen moments (seconds from the start of the video). */
+  writeUps: z.array(z.strictObject({ text: z.string().trim().min(1).max(220), at: z.number().min(0).max(3600), seconds: z.number().min(1.5).max(15) })).max(12).optional(),
 });
 export type Titles = z.infer<typeof titlesSchema>;
 
@@ -64,130 +87,133 @@ export function openingSeconds(titles: Titles | null): number {
   return total > 0 ? total + 0.6 : 0;
 }
 
+/* ------------------------------------------------------------------ looks (media/textfx.ts) */
+
+/** The parts of the title set, each with its own look. */
+export const TITLE_ROLES = ['title', 'credit', 'story', 'end', 'rights', 'writeUp'] as const;
+export type TitleRole = (typeof TITLE_ROLES)[number];
+
+/** Titles saved before templates existed keep their look. */
+const LEGACY_TEMPLATE: Record<TitleStyle, TextTemplateId> = { classic: 'cinematic', minimal: 'minimal', typewriter: 'typewriter', bold: 'impact' };
+
+/** The template in effect: the chosen one, else the one the old style maps to. */
+export const titleTemplate = (titles: Pick<Titles, 'template' | 'style'>): TextTemplateId => titles.template ?? LEGACY_TEMPLATE[titles.style];
+
+/**
+ * Each part's look: derived from the template (the title in it, credits small and quiet, story
+ * cards and write-ups as readable paragraphs, the publishing rights small at the bottom), then the
+ * artist's own tweaks per part on top.
+ */
+export function titleLooks(titles: Pick<Titles, 'template' | 'style' | 'looks'>): Record<TitleRole, TextStyle> {
+  const id = titleTemplate(titles);
+  const look = templateStyle(id);
+  const centred = { position: 'middle', align: 'center' } as const;
+  const readable: TextStyle['font'][] = ['cinzel', 'playfair', 'spacemono', 'inter', 'montserrat', 'poppins'];
+  const story: TextStyle = { ...templateStyle('write-up'), ...(readable.includes(look.font) ? { font: look.font } : {}), color: look.color, ...centred };
+  const credit: TextStyle = {
+    ...look,
+    ...centred,
+    size: Math.max(0.4, +(look.size * 0.42).toFixed(2)),
+    glow: +(look.glow * 0.5).toFixed(2),
+    in: look.in === 'typewriter' ? 'typewriter' : 'fade',
+    out: 'fade',
+  };
+  const derived: Record<TitleRole, TextStyle> = {
+    title: { ...look, ...centred },
+    credit,
+    story,
+    end: { ...credit, position: 'lower-third' },
+    rights: templateStyle('publishing-rights'),
+    writeUp: { ...story, position: 'lower-third', size: Math.min(story.size, 0.7) },
+  };
+  for (const role of TITLE_ROLES) {
+    const own = titles.looks?.[role];
+    if (own) derived[role] = own;
+  }
+  return derived;
+}
+
 /* ------------------------------------------------------------------ ASS */
 
-const FONT: Record<TitleStyle, { small: string; big: string; spacing: number; bold: boolean }> = {
-  classic: { small: 'Georgia', big: 'Georgia', spacing: 6, bold: false },
-  minimal: { small: 'Arial', big: 'Arial', spacing: 9, bold: false },
-  typewriter: { small: 'Courier New', big: 'Courier New', spacing: 3, bold: false },
-  bold: { small: 'Arial', big: 'Arial Black', spacing: 3, bold: true },
-};
+export type Frame = TextFrame;
 
-const stamp = (seconds: number): string => {
-  const cs = Math.max(0, Math.round(seconds * 100));
-  return `${Math.floor(cs / 360_000)}:${String(Math.floor(cs / 6000) % 60).padStart(2, '0')}:${String(Math.floor(cs / 100) % 60).padStart(2, '0')}.${String(cs % 100).padStart(2, '0')}`;
-};
-const escape = (value: string): string => value.replace(/\\/g, '\\\\').replace(/\{/g, '\\{').replace(/\}/g, '\\}').replace(/\r?\n/g, '\\N');
+const STYLE_NAME: Record<TitleRole, string> = { title: 'Title', credit: 'Credit', story: 'Story', end: 'End', rights: 'Rights', writeUp: 'WriteUp' };
 
-export interface Frame {
-  width: number;
-  height: number;
+function header(frame: Frame, looks: Record<TitleRole, TextStyle>): string[] {
+  return assHeader(
+    frame,
+    TITLE_ROLES.map((role) => ({ name: STYLE_NAME[role], style: looks[role] })),
+  );
 }
 
-export function header(frame: Frame, style: TitleStyle): string[] {
-  const font = FONT[style];
-  const unit = Math.min(frame.width, frame.height);
-  const small = Math.round(unit / 30);
-  const big = Math.round(unit / (style === 'bold' ? 9 : 11));
-  const story = Math.round(unit / 22);
-  const margin = Math.round(frame.width / 12);
-  const row = (name: string, fontName: string, size: number, bold: boolean, spacing: number, align: number, marginV: number): string =>
-    `Style: ${name},${fontName},${size},&H00FFFFFF,&H00FFFFFF,&H80000000,&H00000000,${bold ? -1 : 0},0,0,0,100,100,${spacing},0,1,${Math.max(1, Math.round(size / 40))},0,${align},${margin},${margin},${marginV},1`;
-  return [
-    '[Script Info]',
-    'ScriptType: v4.00+',
-    `PlayResX: ${frame.width}`,
-    `PlayResY: ${frame.height}`,
-    'WrapStyle: 0',
-    'ScaledBorderAndShadow: yes',
-    '',
-    '[V4+ Styles]',
-    'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    row('Credit', font.small, small, false, font.spacing, 5, 0),
-    row('Artist', font.small, Math.round(small * 1.25), font.bold, font.spacing + 2, 5, 0),
-    row('Song', font.big, big, font.bold, Math.max(1, Math.round(font.spacing / 2)), 5, 0),
-    row('Story', style === 'typewriter' ? 'Courier New' : font.small, story, false, 1, 5, 0),
-    row('End', font.small, Math.round(small * 0.9), false, font.spacing, 2, Math.round(frame.height / 10)),
-    '',
-    '[Events]',
-    'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
-  ];
-}
+const line = (role: TitleRole, looks: Record<TitleRole, TextStyle>, frame: Frame, text: string, start: number, seconds: number): string =>
+  textEvent({ styleName: STYLE_NAME[role], style: looks[role], text, start, seconds, frame });
 
-const upper = (value: string, style: TitleStyle): string => (style === 'minimal' ? value.toLowerCase() : value.toUpperCase());
-
-/** Words appear one after another (typewriter-like), then the card fades out. */
-export function revealWords(text: string, start: number, seconds: number): string {
-  const words = text.split(/\s+/).filter(Boolean);
-  const window = Math.max(0.6, Math.min(seconds * 0.55, words.length * 0.28));
-  const per = (window * 1000) / Math.max(1, words.length);
-  const body = words.map((word, index) => `{\\alpha&HFF&\\t(${Math.round(index * per)},${Math.round(index * per + 260)},\\alpha&H00&)}${escape(word)}`).join(' ');
-  return `Dialogue: 0,${stamp(start)},${stamp(start + seconds)},Story,,0,0,0,,{\\fad(0,700)}${body}`;
-}
-
-function creditEvents(titles: Titles, start: number): string[] {
+function creditEvents(titles: Titles, looks: Record<TitleRole, TextStyle>, frame: Frame, start: number): string[] {
   const events: string[] = [];
   let at = start;
-  const card = (styleName: string, text: string, seconds: number, extra = ''): void => {
-    events.push(`Dialogue: 0,${stamp(at)},${stamp(at + seconds)},${styleName},,0,0,0,,{\\fad(700,700)${extra}}${text}`);
+  const card = (role: TitleRole, text: string, seconds: number): void => {
+    events.push(line(role, looks, frame, text, at, seconds));
     at += seconds;
   };
-  if (titles.presenter) card('Credit', escape(upper(titles.presenter, titles.style)), 3.4);
-  if (titles.label) card('Credit', escape(upper(titles.label, titles.style)), 3.4);
+  if (titles.presenter) card('credit', titles.presenter, 3.4);
+  if (titles.label) card('credit', titles.label, 3.4);
   if (titles.artist || titles.song) {
-    const featuring = titles.featuring ? `\\N{\\rCredit}${escape(upper(`ft. ${titles.featuring}`, titles.style))}` : '';
-    const artist = titles.artist ? `{\\rArtist}${escape(upper(titles.artist, titles.style))}\\N` : '';
-    const song = titles.song ? `{\\rSong}${escape(titles.style === 'minimal' ? titles.song.toLowerCase() : `“${titles.song.toUpperCase()}”`)}` : '';
-    // Slow push: the title grows ~4% while it is on screen.
-    card('Song', `${artist}${song}${featuring}`, 4.6, '\\fscx100\\fscy100\\t(\\fscx104\\fscy104)');
+    const song = titles.song ? (titleTemplate(titles) === 'minimal' ? titles.song : `“${titles.song}”`) : '';
+    card('title', [titles.artist, song, titles.featuring ? `ft. ${titles.featuring}` : ''].filter(Boolean).join('\n'), 4.6);
   }
   return events;
 }
 
 /**
- * The opening on black: prologue cards then (when placed on black) the
- * credits. Returns its length, or 0 when there is nothing to put on black.
+ * The opening on black: story cards then (when placed on black) the credits. Returns its length,
+ * or 0 when there is nothing to put on black.
  */
 export async function writeOpeningAss(titles: Titles, file: string, frame: Frame): Promise<number> {
   const seconds = openingSeconds(titles);
   if (seconds === 0) return 0;
+  const looks = titleLooks(titles);
   const events: string[] = [];
   let at = 0.3;
   for (const card of titles.prologue) {
-    events.push(revealWords(card.text, at, card.seconds));
+    events.push(line('story', looks, frame, card.text, at, card.seconds));
     at += card.seconds;
   }
-  if (titles.placement === 'on-black') events.push(...creditEvents(titles, at));
-  await writeFile(file, [...header(frame, titles.style), ...events, ''].join('\n'), 'utf8');
+  if (titles.placement === 'on-black') events.push(...creditEvents(titles, looks, frame, at));
+  await writeFile(file, [...header(frame, looks), ...events, ''].join('\n'), 'utf8');
   return seconds;
 }
 
 /**
- * Titles drawn over the finished video: the credits over the intro (when
- * placed there) and the end credit over the last seconds. Returns false when
- * there is nothing to draw.
+ * Text drawn over the finished video: the credits over the intro (when placed there), the
+ * write-ups at their times, the "Directed by" credit and the publishing rights over the last
+ * seconds. Returns false when there is nothing to draw.
  */
 export async function writeOverlayAss(titles: Titles, file: string, frame: Frame & { total: number }): Promise<boolean> {
   if (!titles.enabled) return false;
+  const looks = titleLooks(titles);
   const events: string[] = [];
   if (titles.placement === 'over-intro') {
     // Fit inside the first half of the video for very short cuts.
-    const credits = creditEvents(titles, 0.8);
+    const credits = creditEvents(titles, looks, frame, 0.8);
     const scale = Math.min(1, (frame.total * 0.5) / 12);
     events.push(...(scale < 1 ? credits.map((event) => scaleEvent(event, scale)) : credits));
   }
-  if (titles.director && frame.total > 8) {
-    const start = Math.max(0, frame.total - 4.5);
-    events.push(`Dialogue: 0,${stamp(start)},${stamp(frame.total - 0.3)},End,,0,0,0,,{\\fad(600,500)}${escape(upper(`Directed by ${titles.director}`, titles.style))}`);
+  for (const card of titles.writeUps ?? []) {
+    if (card.at >= frame.total - 0.5) continue;
+    events.push(line('writeUp', looks, frame, card.text, card.at, Math.min(card.seconds, frame.total - card.at)));
   }
+  const tail = Math.min(5.5, frame.total * 0.3);
+  if (titles.director && frame.total > 8) events.push(line('end', looks, frame, `Directed by ${titles.director}`, frame.total - tail, tail - 0.3));
+  if (titles.rights?.trim() && frame.total > 4) events.push(line('rights', looks, frame, titles.rights.trim(), frame.total - tail, tail - 0.3));
   if (events.length === 0) return false;
-  await writeFile(file, [...header(frame, titles.style), ...events, ''].join('\n'), 'utf8');
+  await writeFile(file, [...header(frame, looks), ...events, ''].join('\n'), 'utf8');
   return true;
 }
 
 /** Compresses an event's timing (for videos too short for the full sequence). */
 function scaleEvent(event: string, scale: number): string {
-  return event.replace(/^Dialogue: 0,([\d:.]+),([\d:.]+),/, (_, a: string, b: string) => `Dialogue: 0,${stamp(parse(a) * scale)},${stamp(parse(b) * scale)},`);
+  return event.replace(/^Dialogue: (\d+),([\d:.]+),([\d:.]+),/, (_, layer: string, a: string, b: string) => `Dialogue: ${layer},${stamp(parse(a) * scale)},${stamp(parse(b) * scale)},`);
 }
 const parse = (value: string): number => {
   const [h, m, s] = value.split(':');
