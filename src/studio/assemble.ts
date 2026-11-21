@@ -428,7 +428,8 @@ export async function runAssembly(projectId: string): Promise<void> {
         `fps=${FPS}`,
         ...(hold > 0 ? [`tpad=stop_mode=clone:stop_duration=${hold.toFixed(3)}`] : []),
         ...pieces.late,
-        ...(texts ? [`subtitles=${filterPath(textFile)}`] : []),
+        // Bundled fonts (fontsdir), the same ones the browser previews.
+        ...(texts ? [subtitlesFilter(textFile)] : []),
         'format=yuv420p',
       ];
       await timed('ffmpeg conform', () =>

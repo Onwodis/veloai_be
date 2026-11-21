@@ -139,6 +139,8 @@ export async function view(auth: AuthContext, workspaceId: string, projectId: st
       selectedTakeId: scene.selectedTakeId,
       takes: scene.takes,
       moves: scene.moves,
+      // Clip edits (texts over the scene with the text engine; rendered at the master).
+      edits: scene.edits,
       voice: voice?.url ? { url: voice.url, durationSec: Number((voice.meta as { durationSec?: number }).durationSec ?? 0) } : null,
     };
   });

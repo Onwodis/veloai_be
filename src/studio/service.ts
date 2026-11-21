@@ -86,12 +86,14 @@ const iso = (value: Date | null): string | null => (value ? value.toISOString() 
  */
 type TakeListRow = Pick<TakeRow, 'id' | 'sceneId' | 'status' | 'keyframeKey' | 'videoKey' | 'thumbKey' | 'durationSec' | 'cost' | 'error' | 'engine' | 'review' | 'createdAt' | 'finishedAt'> & {
   edit: TakeSpec['edit'] | null;
+  /** A text card's background (musicvideo/textCard.ts). */
+  card: Record<string, unknown> | null;
   hasOutputs: boolean;
 };
 
 const takeListQuery = (projectId: string) => sql<TakeListRow[]>`
   SELECT id, scene_id, status, keyframe_key, video_key, thumb_key, duration_sec, cost, error, engine, review, created_at, finished_at,
-    spec->'edit' AS edit, (outputs IS NOT NULL AND outputs <> '{}'::jsonb) AS has_outputs
+    spec->'edit' AS edit, spec->'card' AS card, (outputs IS NOT NULL AND outputs <> '{}'::jsonb) AS has_outputs
   FROM studio_takes WHERE project_id = ${projectId} AND status <> 'CANCELED' ORDER BY created_at`;
 
 async function takeView(take: TakeListRow) {
@@ -101,6 +103,7 @@ async function takeView(take: TakeListRow) {
     /** A failed take with paid fal.ai results (or a saved first frame) can resume without paying again. */
     resumable: take.status === 'FAILED' && (take.hasOutputs || Boolean(take.keyframeKey)),
     edit: take.edit ? { kind: take.edit.kind, sourceTakeId: take.edit.sourceTakeId } : null,
+    card: take.card ?? null,
     durationSec: take.durationSec,
     cost: take.cost,
     error: hideEngine(take.error),

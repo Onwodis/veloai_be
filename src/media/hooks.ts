@@ -18,6 +18,7 @@ import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { z } from 'zod';
 import { recordLlmUsage } from '../launch/wallet.js';
 import type { ResolvedEngine } from '../services/ai.service.js';
+import { reportAiError } from '../services/aiAlerts.js';
 import { logger } from '../utils/logger.js';
 import type { Beat, BeatKind } from './edit.js';
 import type { Word } from './transcribe.js';
@@ -271,7 +272,11 @@ async function pickWithOpenAICompatible(engine: ResolvedEngine, all: Sentence[],
       response_format: { type: 'json_object' },
     }));
   }
-  if (status >= 400) throw new Error(`${engine.model} request failed (HTTP ${status}): ${data.error?.message?.slice(0, 200) ?? 'no detail'}`);
+  if (status >= 400) {
+    const message = `${engine.model} request failed (HTTP ${status}): ${data.error?.message?.slice(0, 200) ?? 'no detail'}`;
+    reportAiError({ service: `LLM (${engine.provider})`, endpoint: engine.model, error: message, where: 'picking clips' });
+    throw new Error(message);
+  }
 
   const message = data.choices?.[0]?.message;
   if (message?.refusal) throw new Error(`${engine.model} declined the transcript: ${message.refusal.slice(0, 160)}`);
@@ -458,6 +463,8 @@ export async function detectHooks(words: Word[], options: HookOptions, engine: R
     } catch (error) {
       // The job still produces reels; the engine log records why the AI pick fell back.
       logger.error({ err: error, model: engine.model }, 'AI hook detection failed; using heuristic picker');
+      // The OpenAI-compatible path reports its own HTTP failures; the Claude SDK path is reported here.
+      if (engine.provider === 'ANTHROPIC') reportAiError({ service: 'LLM (Anthropic)', endpoint: engine.model, error: (error as Error).message ?? String(error), where: 'picking clips' });
       // `targetSeconds` here is the shrunk length: with the creator's original
       // length a short video only ever has room for one window.
       result = { ...heuristic(pickable, targetSeconds, options.directions), engine: `heuristic scorer (${engine.model} failed: ${error instanceof Error ? error.message.slice(0, 120) : 'error'})` };

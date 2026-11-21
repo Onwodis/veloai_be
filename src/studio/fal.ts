@@ -7,6 +7,7 @@
  * The handle is persisted on the take before waiting, so a worker restart
  * resumes polling the same request instead of paying fal for it twice.
  */
+import { reportAiError } from '../services/aiAlerts.js';
 import { secret } from '../vault/secrets.js';
 import { clampText } from './cinema.js';
 
@@ -29,6 +30,12 @@ export class FalError extends Error {
     super(message);
     this.name = 'FalError';
   }
+}
+
+/** Every provider-side failure is reported to the super admins (grouped, at most one email per 15 min). */
+function failed(endpoint: string, where: string, error: FalError): FalError {
+  reportAiError({ service: 'fal.ai', endpoint, error: error.message, where });
+  return error;
 }
 
 export function falConfigured(): boolean {
@@ -69,7 +76,7 @@ function clampPrompts(input: Record<string, unknown>): Record<string, unknown> {
 
 export async function submit(endpoint: string, input: Record<string, unknown>): Promise<FalHandle> {
   const response = await fetch(`${QUEUE_URL}/${endpoint}`, { method: 'POST', headers: headers(), body: JSON.stringify(clampPrompts(input)), signal: AbortSignal.timeout(60_000) });
-  if (!response.ok) throw new FalError(`${endpoint} rejected the request: ${await errorText(response)}`, response.status);
+  if (!response.ok) throw failed(endpoint, 'sending a request', new FalError(`${endpoint} rejected the request: ${await errorText(response)}`, response.status));
   const body = (await response.json()) as { request_id: string; status_url?: string; response_url?: string };
   // Older responses omit the URLs; they live under the app id (first two path segments).
   const app = endpoint.split('/').slice(0, 2).join('/');
@@ -102,20 +109,20 @@ export async function wait<T = Record<string, unknown>>(handle: FalHandle, optio
     if ('json' in response && response.ok) {
       const body = (await response.json()) as { status?: string; error?: string };
       status = body.status ?? 'UNKNOWN';
-      if (body.error) throw new FalError(`${handle.endpoint}: ${body.error}`);
+      if (body.error) throw failed(handle.endpoint, 'generating', new FalError(`${handle.endpoint}: ${body.error}`));
     } else if ('json' in response && response.status >= 400 && response.status < 500 && response.status !== 429) {
-      throw new FalError(`${handle.endpoint} status check failed: ${await errorText(response)}`, response.status);
+      throw failed(handle.endpoint, 'checking progress', new FalError(`${handle.endpoint} status check failed: ${await errorText(response)}`, response.status));
     }
     await options.onTick?.(status);
     if (status === 'COMPLETED') break;
     if (Date.now() > deadline) {
       await cancel(handle);
-      throw new FalError(`${handle.endpoint} did not finish within ${Math.round((options.timeoutMs ?? DEFAULT_TIMEOUT_MS) / 60_000)} minutes`);
+      throw failed(handle.endpoint, 'waiting for the result', new FalError(`${handle.endpoint} did not finish within ${Math.round((options.timeoutMs ?? DEFAULT_TIMEOUT_MS) / 60_000)} minutes`));
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   }
   const result = await fetch(handle.responseUrl, { headers: headers(), signal: AbortSignal.timeout(60_000) });
-  if (!result.ok) throw new FalError(`${handle.endpoint} failed: ${await errorText(result)}`, result.status);
+  if (!result.ok) throw failed(handle.endpoint, 'fetching the result', new FalError(`${handle.endpoint} failed: ${await errorText(result)}`, result.status));
   return (await result.json()) as T;
 }
 

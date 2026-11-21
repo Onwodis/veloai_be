@@ -17,6 +17,7 @@ import { authorize } from '../middleware/authorize.js';
 import { validate, validBody, validParams } from '../middleware/validate.js';
 import * as marketing from './service.js';
 import * as brand from './brandLogo.js';
+import * as flyers from './adFlyers.js';
 import * as siteMedia from './siteMedia.js';
 
 type Handler = (req: Request, res: Response) => Promise<unknown>;
@@ -81,6 +82,14 @@ const brandUseBody = z.strictObject({ id: z.uuid().nullable() });
 adminMarketingRouter.post('/brand/use', validate({ body: brandUseBody }), send(async (req) => brand.useLogo(requireAuth(req).userId, validBody(req, brandUseBody).id)));
 const logoParams = z.strictObject({ logoId: z.uuid() });
 adminMarketingRouter.delete('/brand/logos/:logoId', validate({ params: logoParams }), send(async (req, res) => brand.deleteLogo(requireAuth(req).userId, validParams(res, logoParams).logoId)));
+
+// Meta ad flyers (adFlyers.ts): one ad in every Meta placement size.
+adminMarketingRouter.get('/flyers', send(async () => flyers.flyersView()));
+adminMarketingRouter.post('/flyers', validate({ body: flyers.newFlyerSchema }), send(async (req) => flyers.createFlyers(requireAuth(req).userId, validBody(req, flyers.newFlyerSchema))));
+const flyerParams = z.strictObject({ flyerId: z.uuid() });
+const rewordSchema = flyers.flyerWordsSchema.extend({ sizes: z.array(z.enum(Object.keys(flyers.FLYER_SIZES) as [flyers.FlyerSize, ...flyers.FlyerSize[]])).optional() });
+adminMarketingRouter.put('/flyers/:flyerId', validate({ params: flyerParams, body: rewordSchema }), send(async (req, res) => flyers.rewordFlyers(requireAuth(req).userId, validParams(res, flyerParams).flyerId, validBody(req, rewordSchema))));
+adminMarketingRouter.delete('/flyers/:flyerId', validate({ params: flyerParams }), send(async (req, res) => flyers.deleteFlyers(requireAuth(req).userId, validParams(res, flyerParams).flyerId)));
 
 /** GET /api/v1/public/site-media: every site slot's live image / video address, and the live logo (no sign-in). */
 export const publicSiteMediaRouter: Router = Router();

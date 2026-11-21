@@ -101,5 +101,7 @@ export const refreshLimiter = limiter('refresh', { windowMs: 15 * 60_000, limit:
 
 /** Identity documents and data requests: rare actions, tight limits. */
 export const kycLimiter = limiter('kyc', { windowMs: 60 * 60_000, limit: 30 });
+/** The public artist upload link (page loads, upload grants, the submission), per IP. */
+export const intakeLimiter = limiter('artist-upload', { windowMs: 15 * 60_000, limit: 150 });
 export const dataRequestLimiter = limiter('data-request', { windowMs: 24 * 60 * 60_000, limit: 10 });
 export const exportLimiter = limiter('data-export', { windowMs: 60 * 60_000, limit: 5 });

@@ -15,17 +15,24 @@
  */
 import { writeFile } from 'node:fs/promises';
 import { z } from 'zod';
+import { assHeader, TEXT_TEMPLATE_IDS, templateStyle, textEvent, textStyleSchema, type TextStyle } from '../media/textfx.js';
 import { LOOK_IDS, LOOKS, type Look } from './cinema.js';
 
 export const textOverlaySchema = z.strictObject({
   id: z.string().trim().min(1).max(40),
-  text: z.string().trim().min(1).max(140),
-  start: z.number().min(0).max(30),
-  end: z.number().min(0).max(30),
+  text: z.string().trim().min(1).max(300),
+  start: z.number().min(0).max(60),
+  end: z.number().min(0).max(60),
+  /** Legacy quick settings (texts saved before the text engine); `look` wins when set. */
   position: z.enum(['top', 'center', 'bottom', 'lower-third']).default('lower-third'),
   size: z.enum(['s', 'm', 'l']).default('m'),
   style: z.enum(['clean', 'bold', 'serif']).default('clean'),
+  /** The text engine template this text started from (media/textfx.ts). */
+  template: z.enum(TEXT_TEMPLATE_IDS).optional(),
+  /** Full look: font, size (any, 30 %-300 %), weight, colour, glow, outline, position, entrance / exit. */
+  look: textStyleSchema.optional(),
 });
+export type TextOverlay = z.infer<typeof textOverlaySchema>;
 
 export const clipEditsSchema = z.strictObject({
   trimIn: z.number().min(0).max(9).default(0),
@@ -41,7 +48,7 @@ export const clipEditsSchema = z.strictObject({
     })
     .default({ brightness: 0, contrast: 1, saturation: 1, warmth: 0 }),
   zoom: z.enum(['none', 'in', 'out']).default('none'),
-  texts: z.array(textOverlaySchema).max(6).default([]),
+  texts: z.array(textOverlaySchema).max(8).default([]),
 });
 export type ClipEdits = z.infer<typeof clipEditsSchema>;
 
@@ -84,44 +91,42 @@ export function clipFilters(edits: ClipEdits, frame: { width: number; height: nu
   return { input, early, late };
 }
 
-const ASS_ALIGN = { top: 8, center: 5, bottom: 2, 'lower-third': 1 } as const;
-const ASS_FONT = { clean: 'Arial', bold: 'Arial Black', serif: 'Georgia' } as const;
+/**
+ * The look a text is drawn with: its own look, else its template's, else the legacy quick settings
+ * mapped onto the bundled fonts (the old Arial / Georgia names were never installed on the server,
+ * so those texts rendered in a fallback font).
+ */
+export function overlayLook(text: TextOverlay): TextStyle {
+  if (text.look) return text.look;
+  if (text.template) return templateStyle(text.template);
+  const base = templateStyle('lower-third');
+  const font = text.style === 'serif' ? 'playfair' : text.style === 'bold' ? 'anton' : 'inter';
+  return {
+    ...base,
+    font,
+    bold: text.style === 'bold',
+    uppercase: text.style === 'bold',
+    size: text.size === 's' ? 0.55 : text.size === 'l' ? 1.05 : 0.75,
+    position: text.position === 'center' ? 'middle' : text.position,
+    align: text.position === 'lower-third' ? 'left' : 'center',
+    in: 'fade',
+    out: 'fade',
+    inSec: 0.25,
+    outSec: 0.25,
+  };
+}
 
-/** Writes the clip's text overlays as an .ass file (libass); returns false when there is nothing to draw. */
+/**
+ * Writes the clip's texts as an .ass file for the text engine (bundled fonts, animated entrances and
+ * exits; burn it with media/ffmpeg.ts subtitlesFilter). Returns false when there is nothing to draw.
+ */
 export async function writeTextOverlays(edits: ClipEdits, file: string, frame: { width: number; height: number; length: number }): Promise<boolean> {
   const texts = edits.texts.filter((text) => text.end > text.start && text.start < frame.length);
   if (texts.length === 0) return false;
-  const base = Math.round(frame.height / 18);
-  const sizes = { s: Math.round(base * 0.7), m: base, l: Math.round(base * 1.45) };
-  const stamp = (seconds: number): string => {
-    const cs = Math.max(0, Math.round(seconds * 100));
-    return `${Math.floor(cs / 360_000)}:${String(Math.floor(cs / 6000) % 60).padStart(2, '0')}:${String(Math.floor(cs / 100) % 60).padStart(2, '0')}.${String(cs % 100).padStart(2, '0')}`;
-  };
-  const styles = texts.map(
-    (text, index) =>
-      `Style: T${index},${ASS_FONT[text.style]},${sizes[text.size]},&H00FFFFFF,&H00FFFFFF,&H90000000,&H64000000,${text.style === 'clean' ? 0 : -1},0,0,0,100,100,0,0,1,${Math.max(1, Math.round(sizes[text.size] / 22))},1,${ASS_ALIGN[text.position]},${Math.round(frame.width / 14)},${Math.round(frame.width / 14)},${text.position === 'lower-third' ? Math.round(frame.height / 5) : Math.round(frame.height / 14)},1`,
+  const looks = texts.map(overlayLook);
+  const events = texts.map((text, index) =>
+    textEvent({ styleName: `T${index}`, style: looks[index]!, text: text.text, start: text.start, seconds: Math.min(text.end, frame.length) - text.start, frame, layer: index }),
   );
-  const escape = (value: string): string => value.replace(/\\/g, '\\\\').replace(/\{/g, '\\{').replace(/\}/g, '\\}').replace(/\r?\n/g, '\\N');
-  const events = texts.map((text, index) => `Dialogue: 0,${stamp(text.start)},${stamp(Math.min(text.end, frame.length))},T${index},,0,0,0,{\\fad(200,200)},${escape(text.text)}`);
-  await writeFile(
-    file,
-    [
-      '[Script Info]',
-      'ScriptType: v4.00+',
-      `PlayResX: ${frame.width}`,
-      `PlayResY: ${frame.height}`,
-      'WrapStyle: 0',
-      '',
-      '[V4+ Styles]',
-      'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-      ...styles,
-      '',
-      '[Events]',
-      'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
-      ...events,
-      '',
-    ].join('\n'),
-    'utf8',
-  );
+  await writeFile(file, [...assHeader(frame, looks.map((style, index) => ({ name: `T${index}`, style }))), ...events, ''].join('\n'), 'utf8');
   return true;
 }

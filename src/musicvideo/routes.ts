@@ -62,6 +62,8 @@ import * as prologue from './prologue.js';
 import * as god from './godMode.js';
 import * as remix from './remix.js';
 import * as sceneTools from './sceneTools.js';
+import * as textCard from './textCard.js';
+import * as intake from './intake.js';
 import * as director from './service.js';
 import { projectVersion } from '../studio/version.js';
 import { directionSchema } from './songmap.js';
@@ -358,6 +360,38 @@ musicVideoRouter.post('/:projectId/characters/:characterId/approve', validate({ 
 musicVideoRouter.post('/:projectId/scenes', validate({ params: projectParams, body: newSceneSchema }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);
   return { project: await director.addScene(requireAuth(req), workspaceId, projectId, validBody(req, newSceneSchema)) };
+}));
+// Artist upload link (musicvideo/intake.ts): the public link the artist fills in once.
+musicVideoRouter.get('/:projectId/intake', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return { intake: await intake.getIntake(requireAuth(req), workspaceId, projectId) };
+}));
+musicVideoRouter.put('/:projectId/intake', validate({ params: projectParams, body: intake.intakeSettingsSchema }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return { intake: await intake.saveIntake(requireAuth(req), workspaceId, projectId, validBody(req, intake.intakeSettingsSchema)) };
+}));
+musicVideoRouter.post('/:projectId/intake/reopen', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return { intake: await intake.reopenIntake(requireAuth(req), workspaceId, projectId) };
+}));
+musicVideoRouter.delete('/:projectId/intake', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return { intake: await intake.deleteIntake(requireAuth(req), workspaceId, projectId) };
+}));
+const intakeUseSchema = z.strictObject({ song: z.boolean(), photos: z.boolean() });
+musicVideoRouter.post('/:projectId/intake/use', validate({ params: projectParams, body: intakeUseSchema }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return { project: await intake.useIntake(requireAuth(req), workspaceId, projectId, validBody(req, intakeUseSchema)) };
+}));
+
+// Text cards: a blank screen (colour / gradient / vignette) with styled text, as a scene. Free.
+musicVideoRouter.post('/:projectId/scenes/text-card', validate({ params: projectParams, body: textCard.newTextCardSchema }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return { project: await textCard.addTextCard(requireAuth(req), workspaceId, projectId, validBody(req, textCard.newTextCardSchema)) };
+}));
+musicVideoRouter.put('/:projectId/scenes/:sceneId/card-background', validate({ params: sceneParams, body: textCard.cardBackgroundSchema }), send(async (req, res) => {
+  const { workspaceId, projectId, sceneId } = p(res, sceneParams);
+  return { project: await textCard.setCardBackground(requireAuth(req), workspaceId, projectId, sceneId, validBody(req, textCard.cardBackgroundSchema)) };
 }));
 musicVideoRouter.put('/:projectId/scenes/order', validate({ params: projectParams, body: orderSchema }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);

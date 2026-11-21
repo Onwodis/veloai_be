@@ -232,6 +232,12 @@ export async function brandView() {
   };
 }
 
+/** Storage key of the live logo's pale version (for dark artwork), or null when the built-in one is live. */
+export async function activeLogoKey(): Promise<string | null> {
+  const state = await readState();
+  return state.logos.find((logo) => logo.id === state.activeId && logo.status === 'READY')?.darkKey ?? null;
+}
+
 let cached: { value: PublicLogo | null; at: number } | null = null;
 /** The live logo for the site (null = the built-in one). Cached a minute. */
 export async function publicLogo(): Promise<PublicLogo | null> {

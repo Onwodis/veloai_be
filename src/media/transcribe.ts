@@ -14,6 +14,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ResolvedEngine } from '../services/ai.service.js';
+import { reportAiError } from '../services/aiAlerts.js';
 import { ffmpeg, mediaDuration } from './ffmpeg.js';
 
 export interface Word {
@@ -77,11 +78,15 @@ async function transcribeChunk(file: string, engine: ResolvedEngine, signal?: Ab
       if (!response.ok) throw Object.assign(new Error(`Transcription failed (HTTP ${response.status}): ${(await response.text()).slice(0, 300)}`), { fatal: true });
       return (await response.json()) as VerboseJson;
     } catch (error) {
-      if ((error as { fatal?: boolean }).fatal) throw error;
+      if ((error as { fatal?: boolean }).fatal) {
+        reportAiError({ service: 'Transcription', endpoint: engine.model, error: (error as Error).message, where: 'transcribing audio' });
+        throw error;
+      }
       lastError = error;
       await new Promise((resolve) => setTimeout(resolve, 2000 * (attempt + 1)));
     }
   }
+  reportAiError({ service: 'Transcription', endpoint: engine.model, error: (lastError as Error)?.message ?? 'failed after 3 tries', where: 'transcribing audio' });
   throw lastError;
 }
 

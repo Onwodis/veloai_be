@@ -149,3 +149,32 @@ export function dataRequestClosedMail(params: { type: string; status: 'DONE' | '
     text: `${intro}\n\n${params.url}\n\n${outro}`,
   };
 }
+
+/* ------------------------------------------------------------------ music video: artist upload link */
+
+export function artistIntakeMail(params: { project: string; from: string; song: boolean; photos: number; notes: boolean; url: string }): RenderedMail {
+  const parts = [params.song ? 'the song' : '', params.photos ? `${params.photos} photo${params.photos === 1 ? '' : 's'}` : '', params.notes ? 'notes and details' : ''].filter(Boolean);
+  const heading = `${params.from} sent the music video material`;
+  const intro = `${params.from} filled in the upload link for “${params.project}”${parts.length ? ` and sent ${parts.join(', ')}` : ''}. The link is now closed: open the project to review it and use it. To collect again, reopen the link (that clears what was sent).`;
+  return {
+    template: 'artist_intake',
+    subject: `${env.APP_NAME}: ${params.from} sent the material for “${params.project}”`,
+    html: layout({ heading, intro, cta: { label: 'Open the project', url: params.url } }),
+    text: `${intro}\n\n${params.url}`,
+  };
+}
+
+/* ------------------------------------------------------------------ super admin: AI provider errors */
+
+export function aiErrorMail(params: { service: string; endpoint: string; error: string; where: string; count: number; since: string; url: string }): RenderedMail {
+  const heading = `AI error: ${params.service}`;
+  const repeat = params.count > 1 ? ` It happened ${params.count} times since ${params.since} (this email is sent at most once every 15 minutes per service and error).` : '';
+  const intro = `${params.service} returned an error (${params.endpoint}) during ${params.where}: ${params.error}.${repeat}`;
+  const outro = 'Check the provider’s balance, keys and status page. Users saw the job fail; tokens held for it are released.';
+  return {
+    template: 'ai_error',
+    subject: `${env.APP_NAME}: ${params.service} error${params.count > 1 ? ` (×${params.count})` : ''}`,
+    html: layout({ heading, intro, cta: { label: 'Open the admin console', url: params.url }, outro }),
+    text: `${intro}\n\n${params.url}\n\n${outro}`,
+  };
+}
