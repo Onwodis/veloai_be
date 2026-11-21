@@ -17,6 +17,7 @@ import { runStorageLifecycle } from './storage/lifecycle.js';
 import { expireTrials } from './billing/trial.js';
 import { syncPortraits } from './billing/portraits.js';
 import { recoverPrologues } from './musicvideo/prologue.js';
+import { runSchedule as runYoutubeSchedule } from './youtube/service.js';
 import { migrate } from './studio/sql.js';
 import { attachRealtime } from './realtime/ws.js';
 import { purgeExpiredRefreshTokens } from './services/auth.service.js';
@@ -156,6 +157,13 @@ async function main(): Promise<void> {
     intervalMs: 2 * MINUTE,
     runOnBoot: true,
     run: recoverPrologues,
+  });
+  scheduleJob({
+    name: 'youtube-films',
+    description: 'YouTube films: plans each show two weeks ahead, writes the next scripts, makes films due within the lead time (price held, charged when finished) and publishes them on time',
+    intervalMs: 5 * MINUTE,
+    runOnBoot: true,
+    run: runYoutubeSchedule,
   });
   scheduleJob({
     name: 'storage-lifecycle',

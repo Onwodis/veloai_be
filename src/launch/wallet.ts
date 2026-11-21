@@ -20,7 +20,7 @@ import { sql, type Tx } from '../studio/sql.js';
 import { AppError } from '../utils/AppError.js';
 import { logger } from '../utils/logger.js';
 
-export type UsageSource = 'hooks' | 'director' | 'likeness' | 'direction' | 'handshake' | 'music-video' | 'commercial' | 'other';
+export type UsageSource = 'hooks' | 'director' | 'likeness' | 'direction' | 'handshake' | 'music-video' | 'commercial' | 'youtube' | 'other';
 
 export interface LlmUsage {
   source: UsageSource;

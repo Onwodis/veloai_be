@@ -25,6 +25,8 @@ export const SECRET_DEFS = {
   ANTHROPIC_API_KEY: { label: 'Anthropic (Claude) API key', group: 'AI generation', purpose: 'Reel hook picking, the AI director, likeness analysis and prompt direction.', minLength: 20 },
   TRANSCRIPTION_API_KEY: { label: 'Transcription API key', group: 'AI generation', purpose: 'Speech-to-text for reels (OpenAI-compatible; endpoint from TRANSCRIPTION_API_URL).', minLength: 20 },
   OPENAI_API_KEY: { label: 'OpenAI API key', group: 'AI generation', purpose: 'Optional: transcription fallback and selectable hook model.', minLength: 20 },
+  YOUTUBE_CLIENT_ID: { label: 'YouTube (Google OAuth) client ID', group: 'YouTube', purpose: 'Connects YouTube channels for YouTube films (Google Cloud OAuth client, YouTube Data API v3 enabled).', minLength: 20 },
+  YOUTUBE_CLIENT_SECRET: { label: 'YouTube (Google OAuth) client secret', group: 'YouTube', purpose: 'The secret of the same OAuth client.', minLength: 10 },
   PAYSTACK_TEST_SECRET_KEY: { label: 'Paystack test secret key', group: 'Payments', purpose: 'Test-mode token and storage checkouts (sk_test_…).', minLength: 20 },
   PAYSTACK_LIVE_SECRET_KEY: { label: 'Paystack live secret key', group: 'Payments', purpose: 'Live token and storage checkouts (sk_live_…).', minLength: 20 },
 } as const;

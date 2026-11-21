@@ -129,6 +129,9 @@ const envSchema = z
 
     /** Claude (hook detection, titles). The SDK also reads ANTHROPIC_API_KEY itself. */
     ANTHROPIC_API_KEY: z.string().min(10).optional(),
+  /** YouTube films: the Google OAuth client that connects channels and publishes (YouTube Data API v3). */
+  YOUTUBE_CLIENT_ID: z.string().min(10).optional(),
+  YOUTUBE_CLIENT_SECRET: z.string().min(10).optional(),
     CLAUDE_MODEL: z.string().min(5).default('claude-opus-5-5'),
 
     /**
