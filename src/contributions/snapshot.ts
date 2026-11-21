@@ -105,7 +105,12 @@ export interface Change {
 }
 
 const text = (value: Json): string => (value === null || value === undefined ? '' : typeof value === 'string' ? value : JSON.stringify(value));
-const same = (a: Json, b: Json): boolean => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+/** Key order never counts (snapshots stored as jsonb come back with their keys reordered). */
+const stable = (value: Json): string =>
+  JSON.stringify(value ?? null, (_key, inner: unknown) =>
+    inner && typeof inner === 'object' && !Array.isArray(inner) ? Object.fromEntries(Object.entries(inner as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : inner,
+  );
+const same = (a: Json, b: Json): boolean => stable(a) === stable(b);
 const short = (value: Json): string => {
   const out = text(value);
   return out.length > 600 ? `${out.slice(0, 600)}…` : out;

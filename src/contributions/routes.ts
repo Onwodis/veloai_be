@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { authenticate, requireAuth } from '../middleware/authenticate.js';
 import { validate, validBody, validParams } from '../middleware/validate.js';
 import * as contributions from './service.js';
+import * as undo from './undo.js';
 
 type Handler = (req: Request, res: Response) => Promise<unknown>;
 const send = (handler: Handler) => async (req: Request, res: Response) => {
@@ -33,6 +34,24 @@ pushesRouter.post('/:projectId', validate({ params: projectParams, body: pushBod
   const body = validBody(req, pushBody);
   return contributions.push(requireAuth(req), workspaceId, projectId, body.message, body.auto);
 }));
+// Undo / redo (undo.ts), per user. Registered before /:projectId/:pushId so "undo" is not read as a push id.
+pushesRouter.get('/:projectId/undo-state', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = validParams(res, projectParams);
+  return undo.undoState(requireAuth(req), workspaceId, projectId);
+}));
+pushesRouter.post('/:projectId/checkpoint', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = validParams(res, projectParams);
+  return undo.checkpoint(requireAuth(req), workspaceId, projectId);
+}));
+pushesRouter.post('/:projectId/undo', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = validParams(res, projectParams);
+  return undo.undo(requireAuth(req), workspaceId, projectId);
+}));
+pushesRouter.post('/:projectId/redo', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = validParams(res, projectParams);
+  return undo.redo(requireAuth(req), workspaceId, projectId);
+}));
+
 pushesRouter.get('/:projectId/:pushId', validate({ params: pushParams }), send(async (req, res) => {
   const { workspaceId, projectId, pushId } = validParams(res, pushParams);
   return contributions.diffPush(requireAuth(req), workspaceId, projectId, pushId);
