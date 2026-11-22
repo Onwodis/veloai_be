@@ -16,7 +16,7 @@
  */
 import type { Prisma, TokenEntryType } from '@prisma/client';
 import { prisma } from '../config/database.js';
-import { ENGINE_TASK_TYPES, estimateTask, type BilledSteps, type Estimate, type EstimateInput } from '../config/tokenSettings.js';
+import { ENGINE_TASK_PREFIX, ENGINE_TASK_TYPES, estimateTask, isEngineTask, type BilledSteps, type Estimate, type EstimateInput } from '../config/tokenSettings.js';
 import type { AuthContext } from '../middleware/authenticate.js';
 import { AppError } from '../utils/AppError.js';
 import { logger } from '../utils/logger.js';
@@ -273,11 +273,11 @@ export async function reserveTokens(
  * (settled) plus this request must stay within `cap`. Refused with 402 DAILY_CAP otherwise.
  */
 async function assertDailyEngineCap(workspaceId: string, taskType: string, estimate: number, cap: number): Promise<void> {
-  if (cap <= 0 || !(ENGINE_TASK_TYPES as readonly string[]).includes(taskType)) return;
+  if (cap <= 0 || !isEngineTask(taskType)) return;
   const dayStart = new Date();
   dayStart.setUTCHours(0, 0, 0, 0);
   const rows = await prisma.tokenReservation.findMany({
-    where: { workspaceId, taskType: { in: [...ENGINE_TASK_TYPES] }, createdAt: { gte: dayStart }, status: { in: ['HELD', 'SETTLED'] }, unmetered: false },
+    where: { workspaceId, OR: [{ taskType: { in: [...ENGINE_TASK_TYPES] } }, { taskType: { startsWith: ENGINE_TASK_PREFIX } }], createdAt: { gte: dayStart }, status: { in: ['HELD', 'SETTLED'] }, unmetered: false },
     select: { status: true, estimated: true, actual: true },
   });
   const spent = rows.reduce((sum, row) => sum + (row.status === 'HELD' ? row.estimated : (row.actual ?? 0)), 0);

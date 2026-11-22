@@ -410,8 +410,8 @@ export async function transcribeLyrics(auth: AuthContext, workspaceId: string, p
   void (async () => {
     try {
       const prompt = transcriptionPrompt(hint, mv.lyrics?.languages ?? null);
-      const lyrics = await transcribeSong(song.key, (progress) => save(job({ progress: progress.fraction, lines: progress.lines }, state)), prompt);
-      const { seconds: _seconds, ...rest } = lyrics;
+      const lyrics = await transcribeSong(song.key, (progress) => save(job({ progress: progress.fraction, lines: progress.lines }, state)), prompt, hint);
+      const { seconds: _seconds, aligned: _aligned, ...rest } = lyrics;
       const stored: Lyrics = { ...rest, languages: mv.lyrics?.languages ?? null };
       await settleSystem(reservation.id, workspaceId, tokens, `Music video · ${project.title.slice(0, 50)}: lyrics (${minutes} min)`);
       if (!reservation.unmetered) await sql`UPDATE studio_projects SET tokens_charged = tokens_charged + ${tokens} WHERE id = ${projectId}`;
@@ -1433,7 +1433,7 @@ async function checkStage(project: ProjectRow, mv: MvRow, stage: Stage): Promise
     case 'SONG':
       if (!mv.artistName.trim()) return 'Enter the artist or band name.';
       if (!project.musicAssetId && !mv.originalSongId) return 'Upload the song.';
-      if (!mv.genre.trim()) return 'Choose the genre.';
+      if (!mv.genre.trim()) return 'Choose the genre (on Song & vision, or at the top of Sound).';
       if (mv.vision.trim().length < 20) return 'Describe how you want the video to look and feel (a few sentences).';
       return null;
     case 'SOUND':

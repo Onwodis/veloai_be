@@ -54,7 +54,8 @@ const SYSTEM =
   'WEAK (dull, nothing happens, no energy for this part of the song), OFF_STORY (does not serve the story or the words under it), OUT_OF_SCOPE (shows something the script did not ask for), ' +
   'POOR_QUALITY (blur, warping, broken hands or faces, artefacts, bad framing), LIP_SYNC (performance shots: mouth hidden, too small, forced or over-wide mouth on a soft line, or not singing), ' +
   'TOO_AI (plastic skin, glossy over-perfect look, impossible camera, uncanny faces; the standard is real-life footage with natural imperfections), ' +
-  'INCONSISTENT (a cast member does not look like their reference photos, or changes between frames), TIMING (pace or movement fights the music), MISFIT (wrong mood, place or wardrobe for the video). ' +
+  'INCONSISTENT (a cast member does not look like their reference photos, or changes between frames; or the shot breaks continuity with the previous shot: different wardrobe, hair, props, place or time of day that the script does not change), TIMING (pace or movement fights the music), MISFIT (wrong mood, place or wardrobe for the video). ' +
+  'Check BLOCKING closely, it is the most common fault of generated shots: a person turning their back to the camera, facing a door or wall, walking away or leaving frame, or someone appearing or vanishing, when the script does not ask for it, is OUT_OF_SCOPE (high); on a performance shot any back, profile or turned-away view, or a hidden mouth, is LIP_SYNC (high). ' +
   'Be fair: a good shot gets score 7+ and no issues. Never invent problems you cannot see.';
 
 const ISSUE_TIMING_DRIFT = 0.25;
@@ -124,6 +125,19 @@ export async function reviewTake(takeId: string, force = false): Promise<void> {
     ]
       .filter(Boolean)
       .join('\n');
+    // Continuity: the scripts either side, and the last frame of the previous scene's chosen take.
+    const neighbours = await sql<(SceneRow & { previousThumb: string | null })[]>`
+      SELECT s.*, t.thumb_key AS previous_thumb FROM studio_scenes s LEFT JOIN studio_takes t ON t.id = s.selected_take_id
+      WHERE s.project_id = ${take.projectId} AND s.position IN (${scene.position - 1}, ${scene.position + 1}) ORDER BY s.position`;
+    const before = neighbours.find((item) => item.position === scene.position - 1);
+    const after = neighbours.find((item) => item.position === scene.position + 1);
+    const continuity = [
+      before ? `Previous scene (${before.position + 1}): ${(before.prompt ?? before.description).slice(0, 500)}${before.costume ? ` Wardrobe: ${before.costume}.` : ''}` : '',
+      after ? `Next scene (${after.position + 1}): ${(after.prompt ?? after.description).slice(0, 400)}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const previousFrame = before?.previousThumb ? await photoBlock(before.previousThumb).catch(() => null) : null;
     const frames = await Promise.all(frameKeys.map((key) => photoBlock(key)));
     const references = await Promise.all(
       characters
@@ -133,6 +147,8 @@ export async function reviewTake(takeId: string, force = false): Promise<void> {
     );
     const { data, engine } = await parse('music-video', ReviewSchema, SYSTEM, [
       { type: 'text', text: context },
+      ...(continuity ? [{ type: 'text' as const, text: `Continuity:\n${continuity}` }] : []),
+      ...(previousFrame ? [{ type: 'text' as const, text: 'A frame from the previous scene as it will be cut (check wardrobe, hair, props and place carry over unless the script changes them):' }, previousFrame] : []),
       { type: 'text', text: `Frames from the shot (start → end):` },
       ...frames,
       ...(references.some(Boolean) ? [{ type: 'text' as const, text: 'Cast reference photos:' }, ...references.filter((block): block is NonNullable<typeof block> => Boolean(block))] : []),

@@ -156,15 +156,39 @@ const animated = (visual: VisualStyle | undefined): boolean => Boolean(visual &&
  * speaker's style from the source video), so the result looks dubbed. Shouted,
  * exaggerated shapes are still out: the model has to redraw them.
  */
-export const NEGATIVE_LIP_SYNC = 'frozen face, expressionless face, botox face, static mouth, clenched jaw, exaggerated mouth shapes, shouting, mouth covered, ';
+export const NEGATIVE_LIP_SYNC =
+  'back to camera, facing away from the camera, rear view, turned away, head turned away, side profile, looking down, face hidden, frozen face, expressionless face, botox face, static mouth, clenched jaw, exaggerated mouth shapes, shouting, mouth covered, ';
+
+/** Scene text that asks for the subject to face away (then turning away is allowed). */
+const FACES_AWAY = /\b(back to (?:the )?camera|from behind|walks? away|walking away|turns? (?:his|her|their)? ?back|turns? away|over (?:his|her|their) shoulder|rear view|facing away|(?:he|she|they) leaves?|exits? the|walks? (?:out|off)|towards? the (?:door|window|horizon)|silhouette)\b/i;
+
+/**
+ * Blocking + continuity for every shot with a person in it. Video models drift: a character turns
+ * to face a door, walks off, or someone appears from nowhere. Unless the scene asks for it, the
+ * subject faces the camera or the action, and the set stays as described.
+ */
+export const BLOCKING =
+  'Blocking and continuity: the people move and face exactly as the scene describes, turned toward the camera or toward the action they are playing; ' +
+  'nobody turns their back to the camera, faces a wall or door, walks away or leaves frame unless the scene says so. ' +
+  'Doors, props, furniture and vehicles stay where the scene puts them; nobody appears or vanishes; wardrobe, hair and anything held stay the same for the whole shot.';
+
+/** Extra negatives for a shot with a person in it whose scene doesn't ask them to face away. */
+export function facingNegative(scene: string | undefined): string {
+  return scene && FACES_AWAY.test(scene) ? '' : 'back to camera, facing away from the camera, walking away, leaving frame, rear view, extra people appearing, ';
+}
 
 /**
  * What to keep out. Animated looks drop the "not drawn / not rendered" list; bold and wild camera
  * energy drop the bans on the very moves they ask for (whip pans, crash zooms, dutch angles).
  */
-export function negativePrompt(lipSync: boolean, options: { energy?: CameraEnergy | undefined; visual?: VisualStyle | undefined } = {}): string {
+export function negativePrompt(
+  lipSync: boolean,
+  options: { energy?: CameraEnergy | undefined; visual?: VisualStyle | undefined; /** A person is in the shot: guard their blocking (see BLOCKING). */ subject?: boolean | undefined; scene?: string | undefined } = {},
+): string {
   const base = (animated(options.visual) ? '' : NEGATIVE_NOT_REAL) + NEGATIVE_ARTIFACTS + (options.energy && options.energy !== 'natural' ? '' : NEGATIVE_TAME_CAMERA) + NEGATIVE_MOTION;
-  return lipSync ? NEGATIVE_LIP_SYNC + base : base;
+  // Lip-synced shots already ban every turned-away view; other shots with people get it unless the scene asks.
+  const facing = !lipSync && options.subject ? facingNegative(options.scene) : '';
+  return (lipSync ? NEGATIVE_LIP_SYNC : '') + facing + base;
 }
 
 /**
@@ -553,6 +577,8 @@ export function motionPrompt(input: PromptInput): string {
       keep: 0,
     },
     { text: input.lipSync ? (soft ? LIP_SYNC_SOFT : LIP_SYNC) : '', keep: 0 },
+    // People in shot: they face and move as written, and the set stays put (no turning to the door, no walking off).
+    { text: input.featuresSubject || input.lipSync ? BLOCKING : '', keep: 0 },
     {
       // The emotion, as what the face does, plus how far to take it.
       text: input.lipSync

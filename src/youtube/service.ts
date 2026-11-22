@@ -11,7 +11,7 @@
 import { z } from 'zod';
 import type { AuthContext } from '../middleware/authenticate.js';
 import { readUrl } from '../services/storage.service.js';
-import { releaseSystem, reserveTokens, settleSystem } from '../services/token.service.js';
+import { getWallet, isUnmetered, releaseSystem, reserveTokens, settleSystem } from '../services/token.service.js';
 import { requireMembership } from '../services/workspace.service.js';
 import { VISUAL_STYLE_IDS } from '../studio/cinema.js';
 import { json, sql } from '../studio/sql.js';
@@ -503,6 +503,14 @@ async function publish(film: FilmRow, show: ShowRow): Promise<void> {
 
 /* ------------------------------------------------------------------ the scheduler */
 
+/** Whether the workspace holds enough available tokens for this film (always true for the unmetered super admin). */
+async function canAfford(show: ShowRow, film: FilmRow): Promise<boolean> {
+  const auth = await ownerAuth(show);
+  if (await isUnmetered(auth)) return true;
+  const wallet = await getWallet(show.workspaceId);
+  return wallet.available >= film.priceTokens;
+}
+
 /**
  * One run (every few minutes): plan two weeks ahead, write tomorrow's scripts, make the films due
  * within the lead time, publish the ones due now, and recover films a restart left "making".
@@ -541,8 +549,15 @@ export async function runSchedule(): Promise<string> {
     const untilPublish = film.publishAt.getTime() - Date.now();
     try {
       if (film.status === 'PLANNED') {
+        // Scripts cost the platform an AI call: only write one when the workspace can pay for the film.
+        if (!(await canAfford(show, film))) {
+          await sql`UPDATE yt_films SET status = 'BLOCKED', error = 'Not enough tokens to make this film: top up and it continues on its own.', updated_at = now() WHERE id = ${film.id}`;
+          continue;
+        }
         await writeScript(film, show);
         written += 1;
+      } else if (film.status === 'BLOCKED' && !film.script) {
+        if (await canAfford(show, film)) await sql`UPDATE yt_films SET status = 'PLANNED', error = NULL, updated_at = now() WHERE id = ${film.id}`;
       } else if ((film.status === 'SCRIPTED' || film.status === 'BLOCKED') && untilPublish < lead) {
         // A slot long past (more than a day late) is dropped rather than published late.
         if (untilPublish < -24 * 3_600_000) {

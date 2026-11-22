@@ -291,9 +291,19 @@ export async function copyObject(from: string, to: string): Promise<void> {
   if (head) await track(to, head.size);
 }
 
-/** URL a browser can play/download. Public bucket URL when configured, else a signed GET. */
+/**
+ * Personal files that must never get a permanent public address (a leaked public URL can't be
+ * revoked): faces and likeness photos, personal uploads and creations, portraits, what artists
+ * send through upload links, identity documents, and trained likeness data.
+ */
+const PRIVATE_PREFIXES = ['users/', 'portraits/', 'intake/', 'kyc/', 'system/likeness/'];
+
+/**
+ * URL a browser can play/download. Public bucket URL when configured (fast, cacheable) for project
+ * media; a signed GET (expires in an hour) for personal files and downloads.
+ */
 export async function readUrl(key: string, downloadName?: string): Promise<string> {
-  if (env.CF_R2_PUBLIC_URL && !downloadName) return `${env.CF_R2_PUBLIC_URL.replace(/\/+$/, '')}/${key.split('/').map(encodeURIComponent).join('/')}`;
+  if (env.CF_R2_PUBLIC_URL && !downloadName && !PRIVATE_PREFIXES.some((prefix) => key.startsWith(prefix))) return `${env.CF_R2_PUBLIC_URL.replace(/\/+$/, '')}/${key.split('/').map(encodeURIComponent).join('/')}`;
   return getSignedUrl(
     s3(),
     new GetObjectCommand({

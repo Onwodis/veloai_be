@@ -70,7 +70,10 @@ export const tokenSettingsSchema = z.strictObject({
 });
 
 /** Task types that spend on the film engine (counted against dailyEngineCap). */
-export const ENGINE_TASK_TYPES = ['STUDIO_TAKES', 'STUDIO_ASSEMBLY', 'MV_CHARACTER_PHOTOS', 'LIKENESS'] as const;
+export const ENGINE_TASK_TYPES = ['STUDIO_TAKES', 'STUDIO_ASSEMBLY', 'MV_CHARACTER_PHOTOS', 'LIKENESS', 'MV_QUICK_CLIP', 'YOUTUBE_FILM'] as const;
+/** Creations reserve as CREATE_<mode> (image, video, …): all film-engine work too. */
+export const ENGINE_TASK_PREFIX = 'CREATE_';
+export const isEngineTask = (taskType: string): boolean => (ENGINE_TASK_TYPES as readonly string[]).includes(taskType) || taskType.startsWith(ENGINE_TASK_PREFIX);
 
 export type TokenSettings = z.infer<typeof tokenSettingsSchema>;
 export type TokenPackage = TokenSettings['packages'][number];

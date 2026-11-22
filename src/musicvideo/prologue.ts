@@ -732,7 +732,7 @@ function shotDirection(plan: ProloguePlan, shot: PlanShot, cast: CharacterRow[],
   ]
     .filter(Boolean)
     .join(' ');
-  const negative = (speaker ? NEGATIVE_LIP_SYNC : inFrame.length ? NEGATIVE_TALKING : '') + (inFrame.length ? NEGATIVE_STAGING : '') + negativePrompt(false, look);
+  const negative = (speaker ? NEGATIVE_LIP_SYNC : inFrame.length ? NEGATIVE_TALKING : '') + (inFrame.length ? NEGATIVE_STAGING : '') + negativePrompt(false, { ...look, subject: inFrame.length > 0 && !speaker, scene });
   return { scene, negative };
 }
 

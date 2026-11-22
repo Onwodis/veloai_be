@@ -256,7 +256,8 @@ musicVideoRouter.patch('/:projectId/song', validate({ params: projectParams, bod
   const { workspaceId, projectId } = p(res, projectParams);
   return { project: await director.updateSong(requireAuth(req), workspaceId, projectId, validBody(req, songSchema)) };
 }));
-const transcribeSchema = z.strictObject({ hint: text(1000).optional() }).optional();
+// The artist's lines: a few samples (spelling hints) or the full lyrics (kept word for word, timed to the song).
+const transcribeSchema = z.strictObject({ hint: text(8000).optional() }).optional();
 musicVideoRouter.post('/:projectId/lyrics', validate({ params: projectParams, body: transcribeSchema }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);
   return { project: await director.transcribeLyrics(requireAuth(req), workspaceId, projectId, validBody(req, transcribeSchema)?.hint) };

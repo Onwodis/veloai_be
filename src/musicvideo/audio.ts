@@ -24,6 +24,7 @@ import { transcribe } from '../media/transcribe.js';
 import { resolveEngine } from '../services/ai.service.js';
 import { downloadToFile, uploadFile } from '../services/storage.service.js';
 import { AppError } from '../utils/AppError.js';
+import { alignKnownLyrics, looksLikeFullLyrics } from './lyricsAlign.js';
 
 export interface Region {
   id: string;
@@ -413,7 +414,13 @@ export interface LyricsProgress {
  * heard so far) can be shown live. Music under the voice makes this
  * approximate; the artist corrects it afterwards.
  */
-export async function transcribeSong(songKey: string, onProgress?: (progress: LyricsProgress) => void | Promise<void>, prompt?: string): Promise<Lyrics & { seconds: number }> {
+export async function transcribeSong(
+  songKey: string,
+  onProgress?: (progress: LyricsProgress) => void | Promise<void>,
+  prompt?: string,
+  /** The artist's full lyrics: kept word for word, only timed from what the model hears. */
+  knownLyrics?: string,
+): Promise<Lyrics & { seconds: number; aligned?: boolean }> {
   const engine = await resolveEngine('transcription');
   if (!engine) throw new Error('No transcription engine is set. A super admin can add an OpenAI or Groq key on the AI models page.');
   const dir = await mkdtemp(join(tmpdir(), 'mv-lyrics-'));
@@ -440,8 +447,11 @@ export async function transcribeSong(songKey: string, onProgress?: (progress: Ly
       const lines = sentences(words).map((line) => ({ start: +line.start.toFixed(2), end: +line.end.toFixed(2), text: line.text }));
       await onProgress?.({ fraction: Math.min(0.99, (index + 1) / pieces.length), lines });
     }
-    const lines = sentences(words).map((line) => ({ start: +line.start.toFixed(2), end: +line.end.toFixed(2), text: line.text }));
-    return { text: texts.join(' ').trim(), lines, language, engine: engine.label, seconds: durationSec };
+    const heardLines = sentences(words).map((line) => ({ start: +line.start.toFixed(2), end: +line.end.toFixed(2), text: line.text }));
+    // The artist's own lyrics win: their words, timed to the song (when they really are this song).
+    const aligned = knownLyrics && looksLikeFullLyrics(knownLyrics) ? alignKnownLyrics(words, knownLyrics) : null;
+    if (aligned) return { text: aligned.map((line) => line.text).join('\n'), lines: aligned, language, engine: `${engine.label} + your lyrics`, seconds: durationSec, aligned: true };
+    return { text: texts.join(' ').trim(), lines: heardLines, language, engine: engine.label, seconds: durationSec };
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
