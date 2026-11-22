@@ -15,9 +15,9 @@ import { closeSql } from './studio/sql.js';
 import { BIN_DAYS, purgeExpiredBin } from './studio/service.js';
 import { runStorageLifecycle } from './storage/lifecycle.js';
 import { expireTrials } from './billing/trial.js';
-import { syncPortraits } from './billing/portraits.js';
 import { recoverPrologues } from './musicvideo/prologue.js';
 import { runSchedule as runYoutubeSchedule } from './youtube/service.js';
+import { DELETE_GRACE_DAYS, purgeDeletedUsers } from './admin360/service.js';
 import { migrate } from './studio/sql.js';
 import { attachRealtime } from './realtime/ws.js';
 import { purgeExpiredRefreshTokens } from './services/auth.service.js';
@@ -145,18 +145,18 @@ async function main(): Promise<void> {
     run: expireTrials,
   });
   scheduleJob({
-    name: 'professional-portraits',
-    description: 'Catch-up for professional portraits: users whose first profile photo has no set yet, and sets to retry (no waiting)',
-    intervalMs: HOUR,
-    runOnBoot: true,
-    run: syncPortraits,
-  });
-  scheduleJob({
     name: 'recover-cold-opens',
     description: 'Closes cold-open films left "filming" by a restart: charges only what was made, returns the rest of the hold',
     intervalMs: 2 * MINUTE,
     runOnBoot: true,
     run: recoverPrologues,
+  });
+  scheduleJob({
+    name: 'purge-deleted-users',
+    description: `Permanently deletes users a super admin deleted more than ${DELETE_GRACE_DAYS} days ago: their workspaces, projects, files and account (waits while their work is still running)`,
+    intervalMs: HOUR,
+    runOnBoot: true,
+    run: purgeDeletedUsers,
   });
   scheduleJob({
     name: 'youtube-films',

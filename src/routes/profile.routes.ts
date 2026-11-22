@@ -20,7 +20,6 @@ import { dateOfBirth, gender } from '../models/auth.schemas.js';
 import { authenticate, requireAuth } from '../middleware/authenticate.js';
 import { validate, validBody, validParams } from '../middleware/validate.js';
 import { getPublicUserOrThrow } from '../services/auth.service.js';
-import { portraitsForFirstPhoto } from '../billing/portraits.js';
 import { deleteObject, getObjectStream, uploadBuffer } from '../services/storage.service.js';
 import { AppError } from '../utils/AppError.js';
 import { logger } from '../utils/logger.js';
@@ -78,8 +77,6 @@ profileRouter.put('/avatar', express.raw({ type: [...TYPES], limit: MAX_BYTES })
   await uploadBuffer(key, body, type);
   const previous = await prisma.user.findUnique({ where: { id: userId }, select: { avatarKey: true } });
   await prisma.user.update({ where: { id: userId }, data: { avatarKey: key } });
-  // Professional portraits: made at once from the FIRST photo (a later photo keeps the set). Never blocks the upload.
-  if (!previous?.avatarKey) void portraitsForFirstPhoto(userId, key).catch((error: unknown) => logger.warn({ err: error, userId }, 'portraits not queued'));
   if (previous?.avatarKey) await deleteObject(previous.avatarKey);
   logger.info({ userId, bytes: body.length, type }, 'avatar updated');
   res.json({ user: await getPublicUserOrThrow(userId) });

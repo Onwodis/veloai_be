@@ -18,11 +18,12 @@ import { env } from '../config/env.js';
 import type { AuthContext } from '../middleware/authenticate.js';
 import { sendMail } from '../services/mail/mail.service.js';
 import { kycDecisionMail } from '../services/mail/templates.js';
-import { deleteObject, headObject, presignPut, privateReadUrl } from '../services/storage.service.js';
+import { deleteObject, getObjectStream, headObject, presignPut, privateReadUrl } from '../services/storage.service.js';
 import { json, sql } from '../studio/sql.js';
 import { AppError } from '../utils/AppError.js';
 import { fingerprint } from '../utils/encryption.js';
 import { logger } from '../utils/logger.js';
+import { buildZip, type ZipEntry } from '../utils/zip.js';
 
 export const ID_TYPES = ['NIN', 'PASSPORT', 'DRIVERS_LICENSE', 'VOTERS_CARD', 'NATIONAL_ID'] as const;
 export type IdType = (typeof ID_TYPES)[number];
@@ -337,6 +338,43 @@ export async function reviewQueue(status: KycStatus = 'PENDING') {
     })),
     counts: counts ?? { pending: 0, verified2: 0, verified3: 0, rejected: 0 },
   };
+}
+
+/**
+ * The whole KYC case as one ZIP (super admin): summary.txt + summary.json (details, status,
+ * review history; the ID number itself is never stored, only its last 4 digits) and every
+ * document in full resolution. Each download is logged with who took it.
+ */
+export async function downloadCase(actorId: string, userId: string): Promise<{ fileName: string; zip: Buffer }> {
+  const view = await reviewCase(userId);
+  const [row] = await sql<KycRow[]>`SELECT * FROM kyc_profiles WHERE user_id = ${userId}`;
+  const files: ZipEntry[] = [];
+  for (const slot of DOC_SLOTS) {
+    const doc = row?.documents[slot];
+    if (!doc) continue;
+    const object = await getObjectStream(doc.key);
+    if (!object) continue;
+    const chunks: Buffer[] = [];
+    for await (const chunk of object.body) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+    const ext = /\.([a-z0-9]+)$/i.exec(doc.key)?.[1] ?? (doc.contentType.split('/')[1] ?? 'bin');
+    files.push({ name: `documents/${slot.toLowerCase()}.${ext}`, data: Buffer.concat(chunks) });
+  }
+  const { documents: _documents, ...summary } = view;
+  const lines = [
+    `KYC case: ${view.displayName} <${view.email}>`,
+    `User id: ${view.userId}`,
+    `Downloaded: ${new Date().toISOString()}`,
+    '',
+    ...Object.entries(summary)
+      .filter(([key]) => !['userId', 'email', 'displayName'].includes(key))
+      .map(([key, value]) => `${key}: ${value === null || value === undefined ? '-' : typeof value === 'object' ? JSON.stringify(value) : String(value)}`),
+    '',
+    `Documents: ${files.map((file) => file.name).join(', ') || 'none'}`,
+  ];
+  files.unshift({ name: 'summary.txt', data: Buffer.from(lines.join('\n'), 'utf8') }, { name: 'summary.json', data: Buffer.from(JSON.stringify(summary, null, 2), 'utf8') });
+  logger.warn({ actorId, userId, documents: files.length - 2 }, 'kyc case downloaded');
+  const safe = view.displayName.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'user';
+  return { fileName: `kyc-${safe}-${new Date().toISOString().slice(0, 10)}.zip`, zip: buildZip(files) };
 }
 
 /** One case, with 5-minute signed links to its documents. */

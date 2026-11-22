@@ -19,7 +19,9 @@ import { z } from 'zod';
 import { authenticate, requireAuth } from '../middleware/authenticate.js';
 import { authorize } from '../middleware/authorize.js';
 import { validate, validBody, validParams } from '../middleware/validate.js';
+import { growthBaseline } from './growth.js';
 import * as portraits from './portraits.js';
+import { pricingAudit } from './pricingAudit.js';
 import * as trial from './trial.js';
 import * as watermark from './watermarkRemoval.js';
 
@@ -60,6 +62,9 @@ watermarkRouter.post('/:projectId', validate({ params: projectParams, body: remo
 
 export const adminOffersRouter: Router = Router();
 adminOffersRouter.use(authenticate, authorize('SUPER_ADMIN'));
+/* Pricing & token-gate audit (margin zones, recommended prices) and the growth advisor's baseline. */
+adminOffersRouter.get('/pricing-audit', send(async () => pricingAudit()));
+adminOffersRouter.get('/growth', send(async () => growthBaseline()));
 adminOffersRouter.get('/', send(async () => ({ trial: await trial.getTrialSettings(), watermark: await watermark.getWatermarkSettings(), portraits: await portraits.getPortraitSettings() })));
 adminOffersRouter.put('/portraits', validate({ body: portraits.portraitSettingsSchema }), send(async (req) => ({
   portraits: await portraits.savePortraitSettings(validBody(req, portraits.portraitSettingsSchema), requireAuth(req).userId),

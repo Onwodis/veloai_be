@@ -22,7 +22,9 @@ import { getDummyHash, hashPassword, passwordNeedsRehash, verifyPassword } from 
 import { signAccessToken, signChallengeToken, signRefreshToken, verifyRefreshToken } from '../utils/tokens.js';
 import { recordSecurityEvent, type RequestMeta } from './securityEvent.service.js';
 import { recordSignupConsents } from '../privacy/service.js';
-import { startVerification } from './emailVerification.service.js';
+import { consumeSignupCode, markVerifiedAtSignup } from './emailVerification.service.js';
+import { notifyNewUser } from './newUserAlert.js';
+import { sql } from '../studio/sql.js';
 import { clearBackoff, failedPasswordDelay, lockAccount, secondsUntil } from './authBackoff.js';
 
 export interface SessionTokens {
@@ -149,14 +151,17 @@ export async function register(input: RegisterInput, meta: RequestMeta): Promise
   if (existing) {
     throw AppError.conflict('An account with this email already exists');
   }
+  // The emailed code proves the address before anything is created.
+  await consumeSignupCode(input.email, input.emailCode);
 
   const passwordHash = await hashPassword(input.password);
+  const displayName = `${input.firstName} ${input.lastName}`.slice(0, 80);
 
   const user = await prisma.user.create({
     data: {
       email: input.email,
       passwordHash,
-      displayName: input.displayName,
+      displayName,
       role: input.role,
       gender: input.gender,
       dateOfBirth: input.dateOfBirth,
@@ -164,7 +169,7 @@ export async function register(input: RegisterInput, meta: RequestMeta): Promise
         create: {
           role: 'OWNER',
           workspace: {
-            create: { name: `${input.displayName}'s Studio`, slug: workspaceSlug(input.displayName) },
+            create: { name: `${input.firstName}'s Studio`, slug: workspaceSlug(displayName) },
           },
         },
       },
@@ -180,9 +185,11 @@ export async function register(input: RegisterInput, meta: RequestMeta): Promise
     await prisma.user.delete({ where: { id: user.id } }).catch(() => undefined);
     throw error;
   }
+  await sql`UPDATE users SET first_name = ${input.firstName}, last_name = ${input.lastName} WHERE id = ${user.id}`.catch((error: unknown) => logger.warn({ err: error, userId: user.id }, 'first/last name not saved'));
   await recordSecurityEvent('REGISTERED', meta, user.id);
-  // The confirmation link (the welcome tokens and the trial wait for it); never blocks the sign-up.
-  void startVerification(user.id);
+  // The address was proven by the code: verified now, welcome tokens granted; the super admins hear about it.
+  await markVerifiedAtSignup(user.id);
+  void notifyNewUser({ id: user.id, name: displayName, email: input.email, role: input.role });
   return challengeFor(user);
 }
 
@@ -246,9 +253,10 @@ export async function login(input: LoginInput, meta: RequestMeta): Promise<MfaCh
  * access-token lifetime (15 min) even without its sessions being revoked.
  */
 export async function assertNotSuspended(userId: string): Promise<void> {
-  const rows = await prisma.$queryRaw<Array<{ suspended_at: Date | null; suspended_reason: string | null }>>`
-    SELECT suspended_at, suspended_reason FROM users WHERE id = ${userId}::uuid`;
+  const rows = await prisma.$queryRaw<Array<{ suspended_at: Date | null; suspended_reason: string | null; deleted_at: Date | null }>>`
+    SELECT suspended_at, suspended_reason, deleted_at FROM users WHERE id = ${userId}::uuid`;
   const row = rows[0];
+  if (row?.deleted_at) throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account was deleted. Contact support if you think this is a mistake.');
   if (row?.suspended_at) {
     throw new AppError(403, 'ACCOUNT_SUSPENDED', `This account is suspended${row.suspended_reason ? `: ${row.suspended_reason}` : ''}. Contact support.`);
   }

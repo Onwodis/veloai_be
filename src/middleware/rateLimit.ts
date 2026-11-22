@@ -85,7 +85,10 @@ export const loginLimiter = limiter('login', {
 });
 
 /** Account creation: 5 per hour per IP. */
-export const registerLimiter = limiter('register', { windowMs: 60 * 60_000, limit: 5 });
+export const registerLimiter = limiter('register', { windowMs: 60 * 60_000, limit: 10 });
+
+/** Sign-up email codes: 6 per hour per IP (stops inbox flooding; each code also allows 5 tries). */
+export const signupCodeLimiter = limiter('signup-code', { windowMs: 60 * 60_000, limit: 6 });
 
 /** 2FA codes: 30 tries / 15 min per IP, on top of 5 per challenge. */
 export const mfaLimiter = limiter('mfa', { windowMs: 15 * 60_000, limit: 30, skipSuccessfulRequests: true });

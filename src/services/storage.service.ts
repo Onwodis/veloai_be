@@ -115,7 +115,9 @@ const relaySign = (payload: string): string => createHmac('sha256', relayKey()).
 
 function relayUrl(grant: Omit<RelayGrant, 'e'>): string {
   const payload = Buffer.from(JSON.stringify({ ...grant, e: Date.now() + PRESIGN_SECONDS * 1000 })).toString('base64url');
-  const base = (env.API_PUBLIC_URL ?? `http://localhost:${env.PORT}`).replace(/\/+$/, '');
+  // Without API_PUBLIC_URL the link is a path: the web app sends it to its own API address. (A
+  // localhost fallback here broke every upload in production, where the API is not on localhost.)
+  const base = env.API_PUBLIC_URL ? env.API_PUBLIC_URL.replace(/\/+$/, '') : '';
   return `${base}/api/v1/uploads/${payload}.${relaySign(payload)}`;
 }
 

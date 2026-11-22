@@ -2,7 +2,8 @@
  * /api/v1/auth
  *
  * Password step (answers with a 2FA challenge, never a session):
- *   POST   /register                    create account                      (rate limited)
+ *   POST   /register/code               email a 6-digit sign-up code        (rate limited)
+ *   POST   /register                    create account (with the code)      (rate limited)
  *   POST   /login                       check password                      (rate limited)
  *
  * Second factor (challenge → session):
@@ -30,7 +31,7 @@
 import { Router } from 'express';
 import * as auth from '../controllers/auth.controller.js';
 import { authenticate, optionalAuthenticate, requireAuth } from '../middleware/authenticate.js';
-import { loginAccountLimiter, loginLimiter, mfaLimiter, recoveryLimiter, refreshLimiter, registerLimiter } from '../middleware/rateLimit.js';
+import { loginAccountLimiter, loginLimiter, mfaLimiter, recoveryLimiter, refreshLimiter, registerLimiter, signupCodeLimiter } from '../middleware/rateLimit.js';
 import { requireCsrfHeader } from '../middleware/security.js';
 import { validate, validBody } from '../middleware/validate.js';
 import * as emailVerification from '../services/emailVerification.service.js';
@@ -43,12 +44,17 @@ import {
   mfaRecoverySchema,
   regenerateCodesSchema,
   registerSchema,
+  signupCodeSchema,
   resetPasswordSchema,
   sessionParamsSchema,
 } from '../models/auth.schemas.js';
 
 export const authRouter: Router = Router();
 
+authRouter.post('/register/code', signupCodeLimiter, validate({ body: signupCodeSchema }), async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(await emailVerification.sendSignupCode(validBody(req, signupCodeSchema).email));
+});
 authRouter.post('/register', registerLimiter, validate({ body: registerSchema }), auth.register);
 authRouter.post('/login', loginLimiter, validate({ body: loginSchema }), loginAccountLimiter, auth.login);
 

@@ -45,6 +45,7 @@ const creditSchema = z.strictObject({
   workspaceId: z.uuid().optional(),
 });
 const suspendSchema = z.strictObject({ reason: z.string().trim().min(3).max(300) });
+const deleteUserSchema = z.strictObject({ confirmEmail: z.string().trim().min(3).max(320) });
 const quotaSchema = z.strictObject({ quotaBytes: z.number().int().min(0).max(10 * 1024 ** 4).nullable() });
 
 export const adminUserRouter: Router = Router({ mergeParams: true });
@@ -70,6 +71,9 @@ adminUserRouter.post('/:userId/suspend', validate({ params: userParams, body: su
   admin360.setSuspended(requireAuth(req).userId, uid(res), true, validBody(req, suspendSchema).reason, meta(req)),
 ));
 adminUserRouter.delete('/:userId/suspend', validate({ params: userParams }), send(async (req, res) => admin360.setSuspended(requireAuth(req).userId, uid(res), false, undefined, meta(req))));
+adminUserRouter.get('/:userId/deletion', validate({ params: userParams }), send(async (_req, res) => admin360.deletionPreview(uid(res))));
+adminUserRouter.post('/:userId/delete', validate({ params: userParams, body: deleteUserSchema }), send(async (req, res) => admin360.scheduleDeletion(requireAuth(req).userId, uid(res), validBody(req, deleteUserSchema).confirmEmail, meta(req))));
+adminUserRouter.post('/:userId/restore', validate({ params: userParams }), send(async (req, res) => admin360.restoreUser(requireAuth(req).userId, uid(res))));
 adminUserRouter.post('/:userId/sessions/revoke', validate({ params: userParams }), send(async (req, res) => admin360.revokeSessions(uid(res), meta(req))));
 adminUserRouter.put('/:userId/storage-quota', validate({ params: userParams, body: quotaSchema }), send(async (req, res) => admin360.setStorageQuota(uid(res), validBody(req, quotaSchema).quotaBytes)));
 

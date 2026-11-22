@@ -124,6 +124,14 @@ adminKycRouter.put('/settings', authorize('SUPER_ADMIN'), validate({ body: kyc.k
   settings: await kyc.saveKycSettings(validBody(req, kyc.kycSettingsSchema), requireAuth(req).userId),
 })));
 const caseParams = z.strictObject({ userId: z.uuid() });
+/** Super admin: the whole case (details + full-size documents) as a ZIP. */
+adminKycRouter.get('/:userId/download', authorize('SUPER_ADMIN'), validate({ params: caseParams }), async (req: Request, res: Response) => {
+  const { fileName, zip } = await kyc.downloadCase(requireAuth(req).userId, validParams(res, caseParams).userId);
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(zip);
+});
 adminKycRouter.get('/:userId', validate({ params: caseParams }), send(async (_req, res) => ({ case: await kyc.reviewCase(validParams(res, caseParams).userId) })));
 adminKycRouter.post('/:userId/decision', validate({ params: caseParams, body: kyc.decisionSchema }), send(async (req, res) => ({
   case: await kyc.decide(requireAuth(req), validParams(res, caseParams).userId, validBody(req, kyc.decisionSchema)),

@@ -15,7 +15,7 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
 }
 
-function layout(params: { heading: string; intro: string; cta?: { label: string; url: string }; outro?: string }): string {
+function layout(params: { heading: string; intro: string; cta?: { label: string; url: string }; code?: string; outro?: string }): string {
   const name = escapeHtml(env.APP_NAME);
   const button = params.cta
     ? `<tr><td style="padding:8px 0 24px"><a href="${escapeHtml(params.cta.url)}" style="display:inline-block;padding:14px 28px;border-radius:12px;background:#6d28d9;background-image:linear-gradient(135deg,#7c3aed,#a21caf);color:#ffffff;font-weight:600;text-decoration:none;font-family:Helvetica,Arial,sans-serif">${escapeHtml(params.cta.label)}</a></td></tr>`
@@ -26,6 +26,7 @@ function layout(params: { heading: string; intro: string; cta?: { label: string;
 <tr><td style="font-size:13px;letter-spacing:4px;color:#22d3ee;padding-bottom:24px">${name.toUpperCase()}</td></tr>
 <tr><td style="font-size:24px;font-weight:700;color:#ffffff;padding-bottom:12px">${escapeHtml(params.heading)}</td></tr>
 <tr><td style="font-size:15px;line-height:24px;color:#d1d5db;padding-bottom:24px">${escapeHtml(params.intro)}</td></tr>
+${params.code ? `<tr><td style="padding:4px 0 24px"><span style="display:inline-block;padding:14px 22px;border-radius:12px;background:#0b1020;border:1px solid #374151;font-family:Menlo,Consolas,monospace;font-size:30px;font-weight:700;letter-spacing:10px;color:#ffffff">${escapeHtml(params.code)}</span></td></tr>` : ''}
 ${button}
 ${params.outro ? `<tr><td style="font-size:13px;line-height:20px;color:#9ca3af">${escapeHtml(params.outro)}</td></tr>` : ''}
 </table></td></tr></table></body></html>`;
@@ -39,6 +40,28 @@ export function passwordResetMail(url: string): RenderedMail {
     subject: `Reset your ${env.APP_NAME} password`,
     html: layout({ heading: 'Reset your password', intro, cta: { label: 'Choose a new password', url }, outro }),
     text: `${intro}\n\n${url}\n\n${outro}`,
+  };
+}
+
+export function signupCodeMail(code: string): RenderedMail {
+  const intro = `Use this code to confirm your email and finish creating your ${env.APP_NAME} account. It expires in 10 minutes.`;
+  const outro = "If you didn't start signing up, ignore this email: no account is created without the code.";
+  return {
+    template: 'signup_code',
+    subject: `${code} is your ${env.APP_NAME} sign-up code`,
+    html: layout({ heading: 'Your sign-up code', intro, code, outro }),
+    text: `Your sign-up code: ${code}\n\n${intro}\n\n${outro}`,
+  };
+}
+
+export function newUserMail(params: { name: string; email: string; role: string; total: number; url: string }): RenderedMail {
+  const heading = `New sign-up: ${params.name}`;
+  const intro = `A new account was created and its email confirmed: ${params.name} (${params.email}), signed up as ${params.role.toLowerCase()}. That makes ${params.total.toLocaleString('en')} accounts in total.`;
+  return {
+    template: 'new_user',
+    subject: `${env.APP_NAME}: new sign-up, ${params.name}`,
+    html: layout({ heading, intro, cta: { label: 'Open the user', url: params.url } }),
+    text: `${intro}\n\n${params.url}`,
   };
 }
 

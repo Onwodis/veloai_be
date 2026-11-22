@@ -3,13 +3,11 @@
  * professions (surgeon, pilot, architect, chef…), shown on the dashboard as a
  * playful carousel.
  *
- *   first photo     the FIRST profile photo a user uploads is copied into
- *                   their portraits folder and the set is queued at once: it
- *                   only waits when the worker is busy with other jobs. Later
- *                   photo changes (or removing the photo) keep the set; it is
- *                   never remade from another photo.
- *   sync (hourly,   catch-up: users whose first photo came before this (or
- *   and at start)   whose set failed, up to 3 tries) are queued, no waiting.
+ *   NOT AUTOMATIC   (2026-11-22, owner's call) new sign-ups and new profile
+ *                   photos no longer get a set made for them: the upload hook
+ *                   and the hourly catch-up job are gone. Sets made before
+ *                   stay viewable and downloadable. portraitsForFirstPhoto /
+ *                   syncPortraits remain for a deliberate, opt-in trigger.
  *   generate (job)  the image-edit model, with the photo as the reference,
  *                   keeps the person's identity; each result is stored full
  *                   resolution (private) plus a small watermarked preview.
@@ -45,7 +43,7 @@ export const portraitSettingsSchema = z.strictObject({
   delayHours: z.number().int().min(0).max(24 * 30).optional(),
 });
 export type PortraitSettings = z.infer<typeof portraitSettingsSchema>;
-export const DEFAULT_PORTRAITS: PortraitSettings = { enabled: true, count: 6, priceTokens: 15 };
+export const DEFAULT_PORTRAITS: PortraitSettings = { enabled: false, count: 6, priceTokens: 15 };
 
 const PROFESSIONS = [
   { field: 'surgeon', title: 'Surgeon', scene: 'a surgeon in scrubs and a surgical cap in a bright modern operating theatre, mask lowered, calm confident look' },

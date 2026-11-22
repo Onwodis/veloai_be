@@ -9,6 +9,7 @@
  *   resend     at most once a minute
  * Accounts from before this feature are verified (migration 042).
  */
+import { randomInt, timingSafeEqual } from 'node:crypto';
 import { prisma } from '../config/database.js';
 import { env } from '../config/env.js';
 import { sql } from '../studio/sql.js';
@@ -16,7 +17,7 @@ import { AppError } from '../utils/AppError.js';
 import { randomToken, sha256 } from '../utils/crypto.js';
 import { logger } from '../utils/logger.js';
 import { sendMail } from './mail/mail.service.js';
-import { verifyEmailMail } from './mail/templates.js';
+import { signupCodeMail, verifyEmailMail } from './mail/templates.js';
 import { getTokenSettings } from './settings.service.js';
 import { applyEntry } from './token.service.js';
 
@@ -88,6 +89,55 @@ export async function verifyEmail(raw: string): Promise<{ verified: true; bonus:
 export async function verificationStatus(userId: string): Promise<{ verified: boolean; sentAt: string | null; bonus: number; bonusGranted: boolean }> {
   const [[row], { signupBonus }] = await Promise.all([sql<Row[]>`SELECT * FROM email_verifications WHERE user_id = ${userId}`, getTokenSettings()]);
   return { verified: Boolean(row?.verifiedAt), sentAt: row?.sentAt?.toISOString() ?? null, bonus: signupBonus, bonusGranted: Boolean(row?.bonusGrantedAt) };
+}
+
+/* ------------------------------------------------------------------ sign-up code */
+
+const CODE_TTL_MS = 10 * 60_000;
+const CODE_TRIES = 5;
+const codeHash = (email: string, code: string): string => sha256(`signup:${email}:${code}`);
+
+/**
+ * Step one of sign-up: emails a 6-digit code to the address (a new code replaces the old one;
+ * at most one a minute). No account exists until the code comes back with the sign-up form.
+ */
+export async function sendSignupCode(email: string): Promise<{ sentTo: string; expiresInSeconds: number }> {
+  const existing = await prisma.user.findUnique({ where: { email }, select: { id: true } });
+  if (existing) throw AppError.conflict('An account with this email already exists');
+  const [row] = await sql<{ sentAt: Date }[]>`SELECT sent_at FROM signup_codes WHERE email = ${email}`;
+  if (row && Date.now() - row.sentAt.getTime() < RESEND_GAP_MS) throw new AppError(429, 'RATE_LIMITED', 'A code was just sent: check your inbox (and spam), or ask again in a minute.');
+  const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+  await sql`
+    INSERT INTO signup_codes (email, code_hash, expires_at, attempts, sent_at) VALUES (${email}, ${codeHash(email, code)}, ${new Date(Date.now() + CODE_TTL_MS)}, 0, now())
+    ON CONFLICT (email) DO UPDATE SET code_hash = EXCLUDED.code_hash, expires_at = EXCLUDED.expires_at, attempts = 0, sent_at = now()`;
+  await sendMail(email, signupCodeMail(code));
+  return { sentTo: email, expiresInSeconds: CODE_TTL_MS / 1000 };
+}
+
+/** Checks (and on success consumes) the sign-up code. Wrong codes count; five wrong and a new code is needed. */
+export async function consumeSignupCode(email: string, code: string): Promise<void> {
+  const [row] = await sql<{ codeHash: string; expiresAt: Date; attempts: number }[]>`SELECT code_hash, expires_at, attempts FROM signup_codes WHERE email = ${email}`;
+  const fail = (message: string): never => {
+    throw new AppError(400, 'BAD_REQUEST', message, [{ path: 'emailCode', message }]);
+  };
+  if (!row) return fail('Ask for a code first: we email it to you.');
+  if (row.expiresAt <= new Date()) return fail('That code has expired. Send a new one.');
+  if (row.attempts >= CODE_TRIES) return fail('Too many wrong codes. Send a new one.');
+  const given = Buffer.from(codeHash(email, code));
+  const stored = Buffer.from(row.codeHash);
+  if (given.length !== stored.length || !timingSafeEqual(given, stored)) {
+    await sql`UPDATE signup_codes SET attempts = attempts + 1 WHERE email = ${email}`;
+    return fail(row.attempts + 1 >= CODE_TRIES ? 'Too many wrong codes. Send a new one.' : 'That code is not right. Check the email and try again.');
+  }
+  await sql`DELETE FROM signup_codes WHERE email = ${email}`;
+}
+
+/** The account was created with a confirmed code: mark the address verified and grant the welcome tokens. */
+export async function markVerifiedAtSignup(userId: string): Promise<void> {
+  await sql`
+    INSERT INTO email_verifications (user_id, verified_at, sent_at) VALUES (${userId}, now(), now())
+    ON CONFLICT (user_id) DO UPDATE SET verified_at = coalesce(email_verifications.verified_at, now()), token_hash = NULL`;
+  await grantWelcome(userId).catch((error: unknown) => logger.error({ err: error, userId }, 'welcome tokens not granted at sign-up'));
 }
 
 /** Free tokens wait for a verified address. */

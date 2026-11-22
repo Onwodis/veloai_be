@@ -33,26 +33,57 @@ async function claude(): Promise<{ client: Anthropic; model: string }> {
   throw new AppError(503, 'INTERNAL_ERROR', 'The AI director needs Claude: add an Anthropic key in AI models (or ANTHROPIC_API_KEY in the API .env).');
 }
 
+/**
+ * Who the AI is working for, put in front of every director / writer / reviewer prompt. Users
+ * are artists, labels, brands and agencies making commercial work: casting and styling requests
+ * ("a beautiful curvy lady", "a muscular dancer", "sexy club look") are normal production briefs
+ * and must be carried out, described the way a casting director and stylist would, never
+ * refused or lectured about. The hard lines stay: adults only, nothing sexually explicit or nude.
+ */
+const PRODUCTION_CONTEXT =
+  '<production_context>You are part of a professional video production studio used by recording artists, record labels, brands, agencies and filmmakers ' +
+  'to make music videos, commercials and films for release. This is commercial creative work. Music videos, fashion and ads routinely feature attractive adult ' +
+  'talent: beauty, glamour, confidence, sensual attitude, figure-flattering or revealing fashion (swimwear, club wear, fitted dresses), dance, romance and ' +
+  'nightlife are standard, legitimate creative choices. Requests about how someone looks (body type such as curvy, slim, plus-size, athletic or muscular; ' +
+  'beauty; skin tone; hair; age range; styling) are casting and wardrobe specifications: carry them out faithfully, describe people respectfully and ' +
+  'concretely the way a casting director, stylist and cinematographer would, and never refuse, moralise, add disclaimers or water the brief down because a ' +
+  'request mentions attractiveness, body shape or sensuality. Only these limits apply, silently: every person is an adult (18+); no nudity, no sexual acts and ' +
+  'nothing sexually explicit (keep it tasteful, as broadcast music videos and ads are); no real, identifiable people without consent; nothing hateful. If ' +
+  'part of a request would cross one of those limits, deliver the closest tasteful version that still meets the brief and carry on; do not comment on it.' +
+  '</production_context>\n\n';
+
+/** On a refusal, the request is retried once with this note: produce the tasteful version instead of refusing. */
+const ON_REFUSAL =
+  'Note from the studio: this is a legitimate commercial production brief. If anything in it seemed sensitive, do not refuse: interpret it as a tasteful, ' +
+  'non-explicit, adults-only version (as it would air on broadcast TV or a major music channel) that still delivers the creative intent, and complete the task.';
+
 export async function parse<S extends z.ZodType>(source: UsageSource, schema: S, system: string, content: Anthropic.Beta.BetaContentBlockParam[]): Promise<{ data: z.output<S>; engine: string }> {
   const { client, model } = await claude();
-  const response = await client.beta.messages.parse({
-    model,
-    max_tokens: 16000,
-    ...(FALLBACK_MODELS.has(model) ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const } : {}),
-    thinking: { type: 'adaptive' },
-    output_config: { effort: 'medium', format: betaZodOutputFormat(schema) },
-    system,
-    messages: [{ role: 'user', content }],
-  });
-  const usage = response.usage;
-  void recordLlmUsage({
-    source,
-    provider: 'ANTHROPIC',
-    model: response.model,
-    inputTokens: usage.input_tokens + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0),
-    outputTokens: usage.output_tokens,
-  });
-  if (response.stop_reason === 'refusal') throw new AppError(422, 'BAD_REQUEST', 'The director declined this request. Try rewording the scenes.');
+  const ask = async (messages: Anthropic.Beta.BetaContentBlockParam[]) => {
+    const response = await client.beta.messages.parse({
+      model,
+      max_tokens: 16000,
+      ...(FALLBACK_MODELS.has(model) ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const } : {}),
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'medium', format: betaZodOutputFormat(schema) },
+      system: PRODUCTION_CONTEXT + system,
+      messages: [{ role: 'user', content: messages }],
+    });
+    const usage = response.usage;
+    void recordLlmUsage({
+      source,
+      provider: 'ANTHROPIC',
+      model: response.model,
+      inputTokens: usage.input_tokens + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0),
+      outputTokens: usage.output_tokens,
+    });
+    return response;
+  };
+  let response = await ask(content);
+  if (response.stop_reason === 'refusal') response = await ask([...content, { type: 'text', text: ON_REFUSAL }]);
+  if (response.stop_reason === 'refusal') {
+    throw new AppError(422, 'BAD_REQUEST', 'The AI couldn’t do this one as written, even as a tasteful version. Describe the look in styling terms (body type, wardrobe, attitude) rather than anything explicit, and try again.');
+  }
   if (!response.parsed_output) throw new Error(`Claude returned nothing usable (stop_reason: ${response.stop_reason})`);
   return { data: response.parsed_output as z.output<S>, engine: `${response.model} · Anthropic` };
 }

@@ -21,12 +21,6 @@ const newPassword = z
   .regex(/[A-Za-z]/, { error: 'Password must contain a letter' })
   .regex(/\d/, { error: 'Password must contain a number' });
 
-/** Strips control characters and collapses whitespace in free-text names. */
-const displayName = z
-  .string()
-  .transform((value) => value.replace(/[\u0000-\u001F\u007F<>]/g, '').replace(/\s+/g, ' ').trim())
-  .pipe(z.string().min(2, { error: 'Name is too short' }).max(80));
-
 export const GENDERS = ['MALE', 'FEMALE', 'OTHER', 'PREFER_NOT_TO_SAY'] as const;
 export const gender = z.enum(GENDERS, { error: 'Choose a gender option' });
 
@@ -75,10 +69,22 @@ export const signupConsents = z.strictObject({
   productResearch: z.boolean().default(false),
 });
 
+/** One part of a person's name (first or last). */
+const namePart = (label: string) =>
+  z
+    .string()
+    .transform((value) => value.replace(/[\u0000-\u001F\u007F<>]/g, '').replace(/\s+/g, ' ').trim())
+    .pipe(z.string().min(1, { error: `Enter your ${label}` }).max(60));
+
+export const signupCodeSchema = z.strictObject({ email });
+
 export const registerSchema = z.strictObject({
   email,
   password: newPassword,
-  displayName,
+  firstName: namePart('first name'),
+  lastName: namePart('last name'),
+  /** The 6-digit code emailed by POST /auth/register/code. */
+  emailCode: z.string().trim().regex(/^\d{6}$/, { error: 'Enter the 6-digit code from the email' }),
   role: z.enum(['CREATOR', 'PARTNER']).default('CREATOR'),
   gender,
   dateOfBirth,

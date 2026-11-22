@@ -14,7 +14,7 @@
  */
 import { prisma } from '../config/database.js';
 import { revokeAllSessions } from '../services/auth.service.js';
-import { readUrl } from '../services/storage.service.js';
+import { deletePrefix, readUrl } from '../services/storage.service.js';
 import { getWallet, grant } from '../services/token.service.js';
 import type { RequestMeta } from '../services/securityEvent.service.js';
 import { AppError } from '../utils/AppError.js';
@@ -67,7 +67,7 @@ export async function overview(userId: string) {
   const workspaceIds = workspaceIdsOf(user);
   const [seen, suspension, wallets, numbers, storage, sessions, tickets] = await Promise.all([
     lastSeen(userId),
-    sql<{ suspendedAt: Date | null; suspendedReason: string | null }[]>`SELECT suspended_at, suspended_reason FROM users WHERE id = ${userId}`,
+    sql<{ suspendedAt: Date | null; suspendedReason: string | null; deletedAt: Date | null; purgeAfter: Date | null }[]>`SELECT suspended_at, suspended_reason, deleted_at, purge_after FROM users WHERE id = ${userId}`,
     Promise.all(user.memberships.map(async (member) => ({ ...member.workspace, createdAt: member.workspace.createdAt.toISOString(), role: member.role, wallet: await getWallet(member.workspace.id) }))),
     sql<{ studioProjects: number; musicVideos: number; reelProjects: number; reels: number; creations: number; takes: number; tokensUsed: number; tokensBought: number; revenue: number; payments: number }[]>`
       SELECT
@@ -100,6 +100,8 @@ export async function overview(userId: string) {
       failedLoginCount: user.failedLoginCount,
       suspendedAt: suspension[0]?.suspendedAt?.toISOString() ?? null,
       suspendedReason: suspension[0]?.suspendedReason ?? null,
+      deletedAt: suspension[0]?.deletedAt?.toISOString() ?? null,
+      purgeAfter: suspension[0]?.purgeAfter?.toISOString() ?? null,
       lastLoginAt: user.lastLoginAt?.toISOString() ?? null,
       createdAt: user.createdAt.toISOString(),
     },
@@ -233,6 +235,180 @@ export async function setSuspended(actorId: string, userId: string, suspended: b
   logger.info({ actorId, userId, suspended }, 'user suspension changed');
   return overview(userId);
 }
+
+/* ------------------------------------------------------------------ deleting a user */
+
+/** Days between "delete" and the permanent purge (restorable until then). */
+export const DELETE_GRACE_DAYS = 14;
+
+interface Membership {
+  workspaceId: string;
+  name: string;
+  role: string;
+  others: number;
+}
+
+async function membershipsOf(userId: string): Promise<Membership[]> {
+  return sql<Membership[]>`
+    SELECT m.workspace_id, w.name, m.role, (SELECT count(*)::int FROM workspace_members o WHERE o.workspace_id = m.workspace_id AND o.user_id <> ${userId}) AS others
+    FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = ${userId}`;
+}
+
+async function deletionState(userId: string): Promise<{ deletedAt: Date | null; purgeAfter: Date | null }> {
+  const [row] = await sql<{ deletedAt: Date | null; purgeAfter: Date | null }[]>`SELECT deleted_at, purge_after FROM users WHERE id = ${userId}`;
+  return row ?? { deletedAt: null, purgeAfter: null };
+}
+
+/**
+ * What deleting this user takes with it, for the warning page: the workspaces that go (only they
+ * belong to them), the shared ones that stay (their own projects in them go; ownership passes on),
+ * the work, files, tokens and YouTube shows involved, and whether anything is running.
+ */
+export async function deletionPreview(userId: string) {
+  const user = await loadUser(userId);
+  const memberships = await membershipsOf(userId);
+  const solo = memberships.filter((row) => row.others === 0);
+  const shared = memberships.filter((row) => row.others > 0);
+  const soloIds = solo.map((row) => row.workspaceId);
+  const [counts] = await sql<{ projects: number; reelProjects: number; creations: number; shows: number; channels: number; tokens: number; payments: number; running: number }[]>`
+    SELECT
+      (SELECT count(*)::int FROM studio_projects WHERE created_by_id = ${userId} OR workspace_id = ANY(${soloIds}::uuid[])) AS projects,
+      (SELECT count(*)::int FROM media_projects WHERE created_by_id = ${userId} OR workspace_id = ANY(${soloIds}::uuid[])) AS reel_projects,
+      (SELECT count(*)::int FROM creations WHERE user_id = ${userId}) AS creations,
+      (SELECT count(*)::int FROM yt_shows WHERE workspace_id = ANY(${soloIds}::uuid[]) AND deleted_at IS NULL) AS shows,
+      (SELECT count(*)::int FROM yt_channels WHERE workspace_id = ANY(${soloIds}::uuid[])) AS channels,
+      (SELECT COALESCE(sum(balance), 0)::int FROM token_wallets WHERE workspace_id = ANY(${soloIds}::uuid[])) AS tokens,
+      (SELECT count(*)::int FROM payments WHERE workspace_id = ANY(${soloIds}::uuid[])) AS payments,
+      (SELECT count(*)::int FROM token_reservations WHERE workspace_id = ANY(${soloIds}::uuid[]) AND status = 'HELD') AS running`;
+  const [storage] = await sql<{ usedBytes: number; files: number }[]>`SELECT used_bytes::float AS used_bytes, files FROM storage_accounts WHERE user_id = ${userId}`;
+  const state = await deletionState(userId);
+  return {
+    user: { id: user.id, email: user.email, displayName: user.displayName, role: user.role, createdAt: user.createdAt.toISOString() },
+    graceDays: DELETE_GRACE_DAYS,
+    deletedAt: state.deletedAt?.toISOString() ?? null,
+    purgeAfter: state.purgeAfter?.toISOString() ?? null,
+    canDelete: user.role !== 'SUPER_ADMIN',
+    workspacesDeleted: solo.map((row) => ({ id: row.workspaceId, name: row.name })),
+    workspacesKept: shared.map((row) => ({ id: row.workspaceId, name: row.name, members: row.others, owner: row.role === 'OWNER' })),
+    counts: { ...counts!, storageBytes: storage?.usedBytes ?? 0, storageFiles: storage?.files ?? 0 },
+  };
+}
+
+/**
+ * Step one (super admin): marks the user deleted. At once they are signed out everywhere, can't
+ * sign in, and their scheduled YouTube shows are paused; nothing is removed yet. The
+ * "purge-deleted-users" job removes everything for good after DELETE_GRACE_DAYS; until then
+ * restoreUser undoes it. `confirmEmail` must match, so the wrong account can't be deleted by a slip.
+ */
+export async function scheduleDeletion(actorId: string, userId: string, confirmEmail: string, meta: RequestMeta) {
+  const user = await loadUser(userId);
+  if (user.role === 'SUPER_ADMIN') throw AppError.badRequest('A super admin cannot be deleted.');
+  if (actorId === userId) throw AppError.badRequest('You cannot delete yourself.');
+  if (confirmEmail.trim().toLowerCase() !== user.email.toLowerCase()) throw AppError.badRequest('Type the user’s email address exactly to confirm.');
+  const state = await deletionState(userId);
+  if (state.deletedAt) throw AppError.conflict('This user is already deleted and waiting for the permanent purge.');
+  const purgeAfter = new Date(Date.now() + DELETE_GRACE_DAYS * DAY);
+  await sql`
+    UPDATE users SET deleted_at = now(), deleted_by = ${actorId}, purge_after = ${purgeAfter},
+      pre_delete_suspension = jsonb_build_object('at', suspended_at, 'reason', suspended_reason),
+      suspended_at = coalesce(suspended_at, now()), suspended_reason = 'This account was deleted'
+    WHERE id = ${userId}`;
+  const solo = (await membershipsOf(userId)).filter((row) => row.others === 0).map((row) => row.workspaceId);
+  if (solo.length) await sql`UPDATE yt_shows SET status = 'PAUSED', updated_at = now() WHERE workspace_id IN ${sql(solo)} AND status = 'ACTIVE'`;
+  await revokeAllSessions(userId, meta).catch(() => undefined);
+  logger.warn({ actorId, userId, email: user.email, purgeAfter }, 'user marked deleted (purge scheduled)');
+  return deletionPreview(userId);
+}
+
+/** Undoes a pending deletion: the account and its previous suspension state come back (shows stay paused). */
+export async function restoreUser(actorId: string, userId: string) {
+  await loadUser(userId);
+  const [row] = await sql<{ deletedAt: Date | null; pre: { at: string | null; reason: string | null } | null }[]>`
+    SELECT deleted_at, pre_delete_suspension AS pre FROM users WHERE id = ${userId}`;
+  if (!row?.deletedAt) throw AppError.conflict('This user is not deleted.');
+  await sql`
+    UPDATE users SET deleted_at = NULL, deleted_by = NULL, purge_after = NULL, pre_delete_suspension = NULL,
+      suspended_at = ${row.pre?.at ? new Date(row.pre.at) : null}, suspended_reason = ${row.pre?.reason ?? null}
+    WHERE id = ${userId}`;
+  logger.warn({ actorId, userId }, 'user deletion undone');
+  return deletionPreview(userId);
+}
+
+/**
+ * Step two (the job): removes everything for good. Workspaces only they belong to go whole
+ * (projects, reels, videos, YouTube shows and channels, wallet and billing history); in shared
+ * workspaces their own projects go and ownership passes to the longest-standing other member;
+ * then the account (everything tied to it cascades) and every stored file of theirs.
+ * Skipped (retried next run) while one of their jobs is still running.
+ */
+async function purgeUser(userId: string): Promise<boolean> {
+  const memberships = await membershipsOf(userId);
+  const solo = memberships.filter((row) => row.others === 0).map((row) => row.workspaceId);
+  const handOver = memberships.filter((row) => row.others > 0 && row.role === 'OWNER').map((row) => row.workspaceId);
+  if (solo.length) {
+    const [running] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM token_reservations WHERE workspace_id IN ${sql(solo)} AND status = 'HELD'`;
+    if (running && running.n > 0) return false;
+  }
+  const intakeLinks = solo.length ? await sql<{ id: string }[]>`SELECT id FROM mv_intake_links WHERE workspace_id IN ${sql(solo)}` : [];
+  // Their own projects in shared workspaces go too (with their files).
+  const ownStudio = await sql<{ id: string; workspaceId: string }[]>`SELECT id, workspace_id FROM studio_projects WHERE created_by_id = ${userId} AND NOT (workspace_id = ANY(${solo}::uuid[]))`;
+  const ownMedia = await sql<{ id: string; workspaceId: string }[]>`SELECT id, workspace_id FROM media_projects WHERE created_by_id = ${userId} AND NOT (workspace_id = ANY(${solo}::uuid[]))`;
+
+  await sql.begin(async (tx) => {
+    for (const workspaceId of handOver) {
+      await tx`
+        UPDATE workspace_members SET role = 'OWNER' WHERE workspace_id = ${workspaceId} AND user_id = (
+          SELECT user_id FROM workspace_members WHERE workspace_id = ${workspaceId} AND user_id <> ${userId} ORDER BY (role = 'OWNER') DESC, created_at LIMIT 1)`;
+    }
+    if (ownStudio.length) await tx`DELETE FROM studio_projects WHERE id IN ${tx(ownStudio.map((row) => row.id))}`;
+    if (ownMedia.length) await tx`DELETE FROM media_projects WHERE id IN ${tx(ownMedia.map((row) => row.id))}`;
+    if (solo.length) {
+      // Tables keyed by workspace without a foreign key (direct-SQL features) go first.
+      await tx`DELETE FROM yt_films WHERE workspace_id IN ${tx(solo)}`;
+      await tx`DELETE FROM yt_shows WHERE workspace_id IN ${tx(solo)}`;
+      await tx`DELETE FROM yt_channels WHERE workspace_id IN ${tx(solo)}`;
+      await tx`DELETE FROM mv_intake_links WHERE workspace_id IN ${tx(solo)}`;
+      await tx`DELETE FROM share_links WHERE workspace_id IN ${tx(solo)}`;
+      await tx`DELETE FROM storage_objects WHERE workspace_id IN ${tx(solo)}`;
+      await tx`DELETE FROM likeness_profiles WHERE workspace_id IN ${tx(solo)}`;
+      await tx`DELETE FROM workspaces WHERE id IN ${tx(solo)}`;
+    }
+    await tx`DELETE FROM project_undo WHERE user_id = ${userId}`;
+    await tx`DELETE FROM users WHERE id = ${userId}`;
+  });
+
+  // Stored files, after the rows are gone (best effort; the storage report shows anything left).
+  const prefixes = [
+    ...solo.flatMap((workspaceId) => [`workspaces/${workspaceId}/`, `youtube/${workspaceId}/`]),
+    ...ownStudio.map((row) => `workspaces/${row.workspaceId}/studio/${row.id}/`),
+    ...ownMedia.map((row) => `workspaces/${row.workspaceId}/projects/${row.id}/`),
+    ...intakeLinks.map((link) => `intake/${link.id}/`),
+    `users/${userId}/`,
+    `portraits/${userId}/`,
+    `system/likeness/${userId}/`,
+  ];
+  let removed = 0;
+  for (const prefix of prefixes) removed += await deletePrefix(prefix).catch(() => 0);
+  logger.warn({ userId, workspaces: solo.length, handedOver: handOver.length, ownProjects: ownStudio.length + ownMedia.length, files: removed }, 'deleted user purged for good');
+  return true;
+}
+
+/** The scheduled job: purges every user whose grace period is over. */
+export async function purgeDeletedUsers(): Promise<string> {
+  const due = await sql<{ id: string }[]>`SELECT id FROM users WHERE deleted_at IS NOT NULL AND purge_after <= now() ORDER BY purge_after LIMIT 20`;
+  let purged = 0;
+  let waiting = 0;
+  for (const row of due) {
+    try {
+      if (await purgeUser(row.id)) purged += 1;
+      else waiting += 1;
+    } catch (error) {
+      logger.error({ err: error, userId: row.id }, 'user purge failed (retried next run)');
+    }
+  }
+  return `${purged} purged${waiting ? `, ${waiting} waiting for running work` : ''}`;
+}
+
 
 export async function revokeSessions(userId: string, meta: RequestMeta) {
   await loadUser(userId);
