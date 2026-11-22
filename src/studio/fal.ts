@@ -22,21 +22,48 @@ export interface FalHandle {
   responseUrl: string;
 }
 
+/**
+ * What went wrong, for retries and for what users are told:
+ *   balance    the provider account is out of credit / locked: retrying won't help; users get a plain
+ *              "temporarily unavailable, nothing charged" and the super admins get the detail
+ *   transient  rate limits, timeouts, overloads, 5xx, network: worth retrying
+ *   fatal      everything else (bad input, content refused, model error)
+ */
+export type FalErrorKind = 'balance' | 'transient' | 'fatal';
+
 export class FalError extends Error {
   constructor(
     message: string,
     readonly status?: number,
+    readonly kind: FalErrorKind = 'fatal',
   ) {
     super(message);
     this.name = 'FalError';
   }
 }
 
+const BALANCE = /exhausted balance|insufficient (?:balance|funds|credit)|user is locked|account (?:is )?locked|billing|payment required|out of credits?|top up your balance/i;
+const TRANSIENT = /timed? ?out|timeout|temporar|overload|try again|rate limit|too many requests|internal server error|service unavailable|bad gateway|gateway timeout|ECONNRESET|ECONNREFUSED|socket hang up|fetch failed|capacity/i;
+
+export function classify(status: number | undefined, text: string): FalErrorKind {
+  if (status === 402 || BALANCE.test(text)) return 'balance';
+  if (status === 0 || status === 408 || status === 429 || (status !== undefined && status >= 500) || TRANSIENT.test(text)) return 'transient';
+  return 'fatal';
+}
+
+/** Users never see provider names or billing internals: this is what they read when the account is out of credit. */
+const UNAVAILABLE = 'The video engine is temporarily unavailable (a provider account issue). Nothing was charged and the team has been alerted; please try again a little later.';
+
 /** Every provider-side failure is reported to the super admins (grouped, at most one email per 15 min). */
 function failed(endpoint: string, where: string, error: FalError): FalError {
   reportAiError({ service: 'fal.ai', endpoint, error: error.message, where });
-  return error;
+  return error.kind === 'balance' ? new FalError(UNAVAILABLE, error.status, 'balance') : error;
 }
+
+/** Worth trying again (a new request), for job-level retries. */
+export const isTransient = (error: unknown): boolean => error instanceof FalError && error.kind === 'transient';
+
+const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function falConfigured(): boolean {
   return Boolean(secret('FAL_KEY'));
@@ -74,17 +101,30 @@ function clampPrompts(input: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+/** Sends a request; rate limits, overloads, 5xx and network blips are retried (3 tries, backing off, honouring Retry-After). */
 export async function submit(endpoint: string, input: Record<string, unknown>): Promise<FalHandle> {
-  const response = await fetch(`${QUEUE_URL}/${endpoint}`, { method: 'POST', headers: headers(), body: JSON.stringify(clampPrompts(input)), signal: AbortSignal.timeout(60_000) });
-  if (!response.ok) throw failed(endpoint, 'sending a request', new FalError(`${endpoint} rejected the request: ${await errorText(response)}`, response.status));
-  const body = (await response.json()) as { request_id: string; status_url?: string; response_url?: string };
+  const body = JSON.stringify(clampPrompts(input));
+  let response: Response | null = null;
+  for (let attempt = 1; ; attempt += 1) {
+    response = await fetch(`${QUEUE_URL}/${endpoint}`, { method: 'POST', headers: headers(), body, signal: AbortSignal.timeout(60_000) }).catch(() => null);
+    if (response?.ok) break;
+    const text = response ? await errorText(response) : 'network error (fetch failed)';
+    const kind = classify(response?.status ?? 0, text);
+    if (kind === 'transient' && attempt < 3) {
+      const retryAfter = Number(response?.headers.get('retry-after'));
+      await pause(Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(30, retryAfter) * 1000 : attempt * 3000);
+      continue;
+    }
+    throw failed(endpoint, 'sending a request', new FalError(`${endpoint} rejected the request: ${text}`, response?.status ?? 0, kind));
+  }
+  const data = (await response.json()) as { request_id: string; status_url?: string; response_url?: string };
   // Older responses omit the URLs; they live under the app id (first two path segments).
   const app = endpoint.split('/').slice(0, 2).join('/');
   return {
     endpoint,
-    requestId: body.request_id,
-    statusUrl: body.status_url ?? `${QUEUE_URL}/${app}/requests/${body.request_id}/status`,
-    responseUrl: body.response_url ?? `${QUEUE_URL}/${app}/requests/${body.request_id}`,
+    requestId: data.request_id,
+    statusUrl: data.status_url ?? `${QUEUE_URL}/${app}/requests/${data.request_id}/status`,
+    responseUrl: data.response_url ?? `${QUEUE_URL}/${app}/requests/${data.request_id}`,
   };
 }
 
@@ -109,20 +149,24 @@ export async function wait<T = Record<string, unknown>>(handle: FalHandle, optio
     if ('json' in response && response.ok) {
       const body = (await response.json()) as { status?: string; error?: string };
       status = body.status ?? 'UNKNOWN';
-      if (body.error) throw failed(handle.endpoint, 'generating', new FalError(`${handle.endpoint}: ${body.error}`));
+      if (body.error) throw failed(handle.endpoint, 'generating', new FalError(`${handle.endpoint}: ${body.error}`, undefined, classify(undefined, body.error)));
     } else if ('json' in response && response.status >= 400 && response.status < 500 && response.status !== 429) {
-      throw failed(handle.endpoint, 'checking progress', new FalError(`${handle.endpoint} status check failed: ${await errorText(response)}`, response.status));
+      const text = await errorText(response);
+      throw failed(handle.endpoint, 'checking progress', new FalError(`${handle.endpoint} status check failed: ${text}`, response.status, classify(response.status, text)));
     }
     await options.onTick?.(status);
     if (status === 'COMPLETED') break;
     if (Date.now() > deadline) {
       await cancel(handle);
-      throw failed(handle.endpoint, 'waiting for the result', new FalError(`${handle.endpoint} did not finish within ${Math.round((options.timeoutMs ?? DEFAULT_TIMEOUT_MS) / 60_000)} minutes`));
+      throw failed(handle.endpoint, 'waiting for the result', new FalError(`${handle.endpoint} did not finish within ${Math.round((options.timeoutMs ?? DEFAULT_TIMEOUT_MS) / 60_000)} minutes`, 408, 'fatal'));
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   }
   const result = await fetch(handle.responseUrl, { headers: headers(), signal: AbortSignal.timeout(60_000) });
-  if (!result.ok) throw failed(handle.endpoint, 'fetching the result', new FalError(`${handle.endpoint} failed: ${await errorText(result)}`, result.status));
+  if (!result.ok) {
+    const text = await errorText(result);
+    throw failed(handle.endpoint, 'fetching the result', new FalError(`${handle.endpoint} failed: ${text}`, result.status, classify(result.status, text)));
+  }
   return (await result.json()) as T;
 }
 

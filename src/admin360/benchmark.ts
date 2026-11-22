@@ -77,7 +77,7 @@ export interface Bottleneck {
 const pct = (part: number, whole: number): number => (whole ? Math.round((part / whole) * 1000) / 10 : 0);
 
 export async function benchmark() {
-  const [studio, tokens, audit, queue] = await Promise.all([getStudioSettings(), getTokenSettings(), pricingAudit(), studioQueueCounts().catch(() => null)]);
+  const [studio, tokens, audit, queue] = await Promise.all([getStudioSettings(), getTokenSettings(), pricingAudit(), Promise.race([studioQueueCounts(), new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000))]).catch(() => null)]);
   const [takes] = await sql<{ total: number; failed: number; avgSeconds: number | null; p90Seconds: number | null; waiting: number }[]>`
     SELECT count(*)::int AS total,
       count(*) FILTER (WHERE status = 'FAILED')::int AS failed,
@@ -103,7 +103,7 @@ export async function benchmark() {
     area: 'Capacity',
     severity: (queue?.['waiting'] ?? 0) > studio.limits.concurrency * 3 ? 'critical' : 'high',
     title: `Only ${studio.limits.concurrency} video job${studio.limits.concurrency === 1 ? '' : 's'} at a time, inside the API process`,
-    evidence: `The studio worker runs ${env.MEDIA_WORKER_INLINE ? 'inside the API server' : 'as a worker'} with concurrency ${studio.limits.concurrency}${queue ? `; right now ${queue['waiting'] ?? 0} waiting, ${queue['active'] ?? 0} running` : ''}. YouTube films make 2 at a time. A restart pauses every job.`,
+    evidence: `${queue ? '' : 'The job queue (Redis) did not answer within 3 s. '}The studio worker runs ${env.MEDIA_WORKER_INLINE ? 'inside the API server' : 'as a worker'} with concurrency ${studio.limits.concurrency}${queue ? `; right now ${queue['waiting'] ?? 0} waiting, ${queue['active'] ?? 0} running` : ''}. YouTube films make 2 at a time. A restart pauses every job.`,
     fix: 'Run the studio worker as its own service (same image, MEDIA_WORKER_INLINE=false on the API), scale it horizontally, and raise concurrency to match the fal.ai account limit.',
     effort: 'M',
   });

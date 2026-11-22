@@ -23,7 +23,16 @@ export async function runResumable(
     await persist({ stage, ...handle });
   }
   const started = Date.now();
-  const result = await fal.wait(handle, options);
+  let result: unknown;
+  try {
+    result = await fal.wait(handle, options);
+  } catch (error) {
+    // A generation that failed for a passing reason (overload, timeout, 5xx) is sent once more.
+    if (!fal.isTransient(error)) throw error;
+    handle = await fal.submit(endpoint, input);
+    await persist({ stage, ...handle });
+    result = await fal.wait(handle, options);
+  }
   await persist(null);
   return { result, seconds: Math.round((Date.now() - started) / 1000) };
 }

@@ -193,6 +193,16 @@ export async function runTake(takeId: string): Promise<void> {
     const started = Date.now();
     const result = await fal.wait(handle, { onTick: check }).catch(async (error: unknown) => {
       if (error instanceof Canceled) await fal.cancel(handle);
+      // A passing provider problem (overload, timeout, 5xx): send the same request once more.
+      if (fal.isTransient(error)) {
+        engines.push(`${stage.toLowerCase()}: retried after a temporary engine error`);
+        const again = await fal.submit(endpoint, input);
+        await set({ falRequest: json({ stage, ...again }) });
+        return fal.wait(again, { onTick: check }).catch(async (retryError: unknown) => {
+          if (retryError instanceof Canceled) await fal.cancel(again);
+          throw retryError;
+        });
+      }
       throw error;
     });
     // Saved the moment it arrives, before anything else can fail.
