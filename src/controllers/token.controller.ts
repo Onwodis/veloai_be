@@ -20,6 +20,7 @@ import {
 import * as paystack from '../services/paystack.service.js';
 import { getTokenSettings, updateTokenSettings } from '../services/settings.service.js';
 import * as tokens from '../services/token.service.js';
+import { getStudioSettings } from '../studio/settings.js';
 import { AppError } from '../utils/AppError.js';
 import { logger } from '../utils/logger.js';
 
@@ -33,7 +34,18 @@ export async function overview(req: Request, res: Response): Promise<void> {
 /** Just the balance, for the navbar chip (polled; the overview is much heavier). */
 export async function wallet(req: Request, res: Response): Promise<void> {
   const { workspaceId } = validParams(res, tokenWorkspaceParamsSchema);
-  res.json(await tokens.walletFor(requireAuth(req), workspaceId));
+  const [result, lowAt] = await Promise.all([tokens.walletFor(requireAuth(req), workspaceId), lowBalanceThreshold()]);
+  res.json({ ...result, lowAt });
+}
+
+/**
+ * Below this many available tokens the dashboard nudges the user to top up (before they try
+ * something and hit the gate): twice the start balance, or two typical 5 s shots, whichever is more.
+ */
+async function lowBalanceThreshold(): Promise<number> {
+  const [settings, studio] = await Promise.all([getTokenSettings(), getStudioSettings()]);
+  const shot = studio.costs.keyframe + studio.costs.videoPerSecond * 5 + studio.costs.lipSyncPerSecond * 5;
+  return Math.max(settings.minimumStartBalance * 2, shot * 2);
 }
 
 export async function preflight(req: Request, res: Response): Promise<void> {
