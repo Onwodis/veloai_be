@@ -481,7 +481,7 @@ musicVideoRouter.post('/:projectId/auto', validate({ params: projectParams, body
   const { workspaceId, projectId } = p(res, projectParams);
   return director.autoShoot(requireAuth(req), workspaceId, projectId, validBody(req, autoSchema).dryRun);
 }));
-/* God mode: song + cast in, the finished video out (godMode.ts). */
+/* Auto Director: song + cast in, the finished video out (godMode.ts). */
 musicVideoRouter.get('/:projectId/god', validate({ params: projectParams }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);
   return god.startGodMode(requireAuth(req), workspaceId, projectId, true);

@@ -20,6 +20,7 @@ import { authenticate, requireAuth } from '../middleware/authenticate.js';
 import { authorize } from '../middleware/authorize.js';
 import { validate, validBody, validParams } from '../middleware/validate.js';
 import { growthBaseline } from './growth.js';
+import { getLowBalanceAlert, lowBalanceAlertSchema, saveLowBalanceAlert } from './lowBalanceAlert.js';
 import * as portraits from './portraits.js';
 import { pricingAudit } from './pricingAudit.js';
 import * as trial from './trial.js';
@@ -65,6 +66,9 @@ adminOffersRouter.use(authenticate, authorize('SUPER_ADMIN'));
 /* Pricing & token-gate audit (margin zones, recommended prices) and the growth advisor's baseline. */
 adminOffersRouter.get('/pricing-audit', send(async () => pricingAudit()));
 adminOffersRouter.get('/growth', send(async () => growthBaseline()));
+/* The in-app low-balance nudge: on/off, timing, threshold. */
+adminOffersRouter.get('/low-balance-alert', send(async () => ({ settings: await getLowBalanceAlert() })));
+adminOffersRouter.put('/low-balance-alert', validate({ body: lowBalanceAlertSchema }), send(async (req) => ({ settings: await saveLowBalanceAlert(validBody(req, lowBalanceAlertSchema), requireAuth(req).userId) })));
 adminOffersRouter.get('/', send(async () => ({ trial: await trial.getTrialSettings(), watermark: await watermark.getWatermarkSettings(), portraits: await portraits.getPortraitSettings() })));
 adminOffersRouter.put('/portraits', validate({ body: portraits.portraitSettingsSchema }), send(async (req) => ({
   portraits: await portraits.savePortraitSettings(validBody(req, portraits.portraitSettingsSchema), requireAuth(req).userId),

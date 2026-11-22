@@ -1,5 +1,5 @@
 /**
- * God mode: the artist brings the song and the cast (photos + their permission), presses one
+ * Auto Director: the artist brings the song and the cast (photos + their permission), presses one
  * button, and the app does everything else, the way a production company would:
  *
  *   lyrics     transcribed (if not yet): the story and the lip sync are built on the words
@@ -59,7 +59,7 @@ export interface GodState {
 
 const LEAD_COUNT = { SOLO: 1, DUO: 2, TRIO: 3, GROUP: 4 } as const;
 
-/** What the artist still has to give before God mode can run (empty = ready). */
+/** What the artist still has to give before Auto Director can run (empty = ready). */
 export async function godReadiness(workspaceId: string, projectId: string): Promise<string[]> {
   const { project, mv } = await load(workspaceId, projectId);
   const missing: string[] = [];
@@ -77,7 +77,7 @@ export async function godReadiness(workspaceId: string, projectId: string): Prom
   return missing;
 }
 
-/** Tokens God mode will hold, step by step (the film is an estimate: one take per scene). */
+/** Tokens Auto Director will hold, step by step (the film is an estimate: one take per scene). */
 export async function godEstimate(workspaceId: string, projectId: string): Promise<{ total: number; parts: { label: string; tokens: number }[] }> {
   const { project, mv } = await load(workspaceId, projectId);
   const { costs, limits, models } = await getStudioSettings();
@@ -134,15 +134,15 @@ export async function resolveGod(projectId: string): Promise<GodState | null> {
   return next ?? state;
 }
 
-/** Runs God mode (or, with dryRun, returns what it needs and what it will cost). */
+/** Runs Auto Director (or, with dryRun, returns what it needs and what it will cost). */
 export async function startGodMode(auth: AuthContext, workspaceId: string, projectId: string, dryRun: boolean) {
   await access(auth, workspaceId, true);
   const missing = await godReadiness(workspaceId, projectId);
   const estimate = await godEstimate(workspaceId, projectId);
   if (dryRun) return { missing, estimate, god: await resolveGod(projectId) };
-  if (missing.length) throw AppError.badRequest(`God mode needs: ${missing.join(' ')}`);
+  if (missing.length) throw AppError.badRequest(`Auto Director needs: ${missing.join(' ')}`);
   const running = await resolveGod(projectId);
-  if (running?.status === 'RUNNING') throw AppError.conflict('God mode is already running on this video.');
+  if (running?.status === 'RUNNING') throw AppError.conflict('Auto Director is already running on this video.');
 
   let state: GodState = {
     status: 'RUNNING',
@@ -224,9 +224,9 @@ export async function startGodMode(auth: AuthContext, workspaceId: string, proje
         auth,
         workspaceId,
         projectId,
-        'God mode: you are directing this end to end. Review the storyboard like a top music-video director: is the first scene a hook that stops a viewer scrolling within a second? Does every cut change the shot size, angle or move? Are the biggest camera moves on the drops and chorus hits, and are the lip-synced performances face-safe and strong? Propose the fixes as concrete scene changes.',
+        'Auto Director: you are directing this end to end. Review the storyboard like a top music-video director: is the first scene a hook that stops a viewer scrolling within a second? Does every cut change the shot size, angle or move? Are the biggest camera moves on the drops and chorus hits, and are the lip-synced performances face-safe and strong? Propose the fixes as concrete scene changes.',
       );
-      await applyAllProposals(auth, workspaceId, projectId).catch((error: unknown) => logger.warn({ err: error, projectId }, 'god mode: no proposals applied'));
+      await applyAllProposals(auth, workspaceId, projectId).catch((error: unknown) => logger.warn({ err: error, projectId }, 'Auto Director: no proposals applied'));
       await done('director');
 
       /* titles */
@@ -259,7 +259,7 @@ export async function startGodMode(auth: AuthContext, workspaceId: string, proje
     } catch (error) {
       if (error instanceof Stopped) return;
       const message = (error instanceof Error ? error.message : String(error)).slice(0, 500);
-      logger.error({ err: error, projectId, step: state.step }, 'god mode failed');
+      logger.error({ err: error, projectId, step: state.step }, 'Auto Director failed');
       state = { ...state, status: 'FAILED', steps: { ...state.steps, [state.step]: 'failed' }, error: message, finishedAt: new Date().toISOString() };
       await save(projectId, state).catch(() => undefined);
     }
@@ -269,11 +269,11 @@ export async function startGodMode(auth: AuthContext, workspaceId: string, proje
 
 class Stopped extends Error {}
 
-/** Stops God mode: the step in hand finishes (paid work is kept), nothing new starts; auto filming stops too. */
+/** Stops Auto Director: the step in hand finishes (paid work is kept), nothing new starts; auto filming stops too. */
 export async function stopGodMode(auth: AuthContext, workspaceId: string, projectId: string) {
   await access(auth, workspaceId, true);
   const state = await current(projectId);
-  if (!state || state.status !== 'RUNNING') throw AppError.badRequest('God mode is not running.');
+  if (!state || state.status !== 'RUNNING') throw AppError.badRequest('Auto Director is not running.');
   await save(projectId, { ...state, status: 'STOPPED', note: 'Stopped. Everything made so far is kept: carry on by hand from any stage.', finishedAt: new Date().toISOString() });
   await sql`UPDATE mv_projects SET auto_mode = false WHERE project_id = ${projectId}`;
   return { god: await current(projectId), project: await view(auth, workspaceId, projectId) };

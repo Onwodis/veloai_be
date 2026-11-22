@@ -21,6 +21,7 @@ import * as paystack from '../services/paystack.service.js';
 import { getTokenSettings, updateTokenSettings } from '../services/settings.service.js';
 import * as tokens from '../services/token.service.js';
 import { getStudioSettings } from '../studio/settings.js';
+import { getLowBalanceAlert } from '../billing/lowBalanceAlert.js';
 import { AppError } from '../utils/AppError.js';
 import { logger } from '../utils/logger.js';
 
@@ -34,8 +35,10 @@ export async function overview(req: Request, res: Response): Promise<void> {
 /** Just the balance, for the navbar chip (polled; the overview is much heavier). */
 export async function wallet(req: Request, res: Response): Promise<void> {
   const { workspaceId } = validParams(res, tokenWorkspaceParamsSchema);
-  const [result, lowAt] = await Promise.all([tokens.walletFor(requireAuth(req), workspaceId), lowBalanceThreshold()]);
-  res.json({ ...result, lowAt });
+  const [result, alert] = await Promise.all([tokens.walletFor(requireAuth(req), workspaceId), getLowBalanceAlert()]);
+  const lowAt = alert.thresholdTokens > 0 ? alert.thresholdTokens : await lowBalanceThreshold();
+  const { thresholdTokens: _threshold, ...timing } = alert;
+  res.json({ ...result, lowAt, alert: timing });
 }
 
 /**
