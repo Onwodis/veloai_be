@@ -458,6 +458,12 @@ musicVideoRouter.post('/:projectId/storyboard', validate({ params: projectParams
   return { project: await director.startStoryboard(requireAuth(req), workspaceId, projectId, validBody(req, storyboardSchema).sceneCount) };
 }));
 
+/* "Regenerate scripts": rewrites copied scripts (free) or every script, in place, in the background. */
+musicVideoRouter.post('/:projectId/scripts/regenerate', validate({ params: projectParams }), send(async (req, res) => {
+  const { workspaceId, projectId } = p(res, projectParams);
+  return { project: await director.startScriptRegeneration(requireAuth(req), workspaceId, projectId) };
+}));
+
 musicVideoRouter.post('/:projectId/stages/:stage/approve', validate({ params: stageParams }), send(async (req, res) => {
   const { workspaceId, projectId, stage } = p(res, stageParams);
   return { project: await director.approveStage(requireAuth(req), workspaceId, projectId, stage) };

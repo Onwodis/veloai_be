@@ -37,7 +37,7 @@ import { publishProgress } from '../realtime/events.js';
 import { arrange, fxFilters, isIdentityArrangement, mixDuration, renderMix, transcribeSong, transcriptionPrompt, videoFrames, type AudioEdits, type AudioTrack, type Clip, type Lyrics, type Region, type TrackFx } from './audio.js';
 import type { CharacterAttributes, CharacterRow, Costume } from './cast.js';
 import { meContext } from '../likeness/service.js';
-import { castCharacter, correctLyrics, detectPeople, discuss, expandScene, polishLyrics, profileVoice, proofreadLyrics, storyboard, type DirectorContext } from './director.js';
+import { castCharacter, correctLyrics, detectPeople, discuss, expandScene, polishLyrics, profileVoice, proofreadLyrics, rewriteScenes, storyboard, type DirectorContext } from './director.js';
 import { polishProject, type PolishReport } from './polish.js';
 import { dismissReview, reviewTake } from './review.js';
 import type { ProjectCategory } from '../config/categories.js';
@@ -498,6 +498,111 @@ export async function startStoryboard(auth: AuthContext, workspaceId: string, pr
     return view(auth, workspaceId, projectId);
   }
   runStoryJob(auth, workspaceId, projectId, sceneCount, base);
+  return view(auth, workspaceId, projectId);
+}
+
+/** Indexes of scenes whose script repeats an earlier scene's (first occurrence kept). */
+function copiedSceneIndexes(scenes: { description: string }[]): number[] {
+  const seen = new Set<string>();
+  const copies: number[] = [];
+  scenes.forEach((scene, index) => {
+    const key = scene.description.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim().slice(0, 100);
+    if (key && seen.has(key)) copies.push(index);
+    if (key) seen.add(key);
+  });
+  return copies;
+}
+
+/**
+ * "Regenerate scripts": rewrites scene scripts in place, keeping every scene's slot on the song
+ * (position, length, the words under it) and any videos already made. When the board has copied
+ * scenes, only the copies are rewritten, free of charge (they come from an old bug); otherwise every
+ * script is rewritten at the storyboard price. Runs in the background with progress and a notice.
+ */
+export async function startScriptRegeneration(auth: AuthContext, workspaceId: string, projectId: string) {
+  await access(auth, workspaceId, true);
+  const { project, mv } = await load(workspaceId, projectId);
+  assertStage(mv, ...SCENE_STAGES);
+  const current = storyJobView(mv.storyJob);
+  if (current && (current.status === 'RUNNING' || current.status === 'WAITING_LYRICS')) throw AppError.conflict(`${env.BOT_NAME} is already working on the scenes: follow the progress on this page.`);
+  const scenes = await loadScenes(projectId);
+  if (!scenes.length) throw AppError.badRequest('There are no scenes yet: press Write the scenes first.');
+  const copies = copiedSceneIndexes(scenes);
+  const free = copies.length > 0;
+  const targets = free ? copies : scenes.map((_, index) => index);
+  const { costs } = await getStudioSettings();
+  if (!free) {
+    // Balance check on the click (the refusal opens the low-balance warning).
+    const probe = await reserveTokens(auth, workspaceId, 'MV_STORYBOARD', costs.mvStoryboard, { projectId, probe: true });
+    await releaseSystem(probe.reservation.id, workspaceId).catch(() => undefined);
+  }
+  let job: StoryJob = {
+    status: 'RUNNING',
+    step: free ? `${env.BOT_NAME} is rewriting the ${copies.length} copied scripts…` : `${env.BOT_NAME} is rewriting every script…`,
+    progress: 0.05,
+    error: null,
+    scenes: null,
+    sceneCount: null,
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    by: { userId: auth.userId, role: auth.role },
+    free,
+  };
+  const save = async (patch: Partial<StoryJob>): Promise<void> => {
+    job = { ...job, ...patch };
+    await saveStoryJob(workspaceId, projectId, job).catch(() => undefined);
+  };
+  await save({});
+  void (async () => {
+    try {
+      const plans = await charged(auth, workspaceId, projectId, 'MV_STORYBOARD', free ? 0 : costs.mvStoryboard, `Music video · ${project.title.slice(0, 50)}: scripts rewritten`, async () => {
+        const context = await directorContext(project, mv);
+        return rewriteScenes(context, targets, (done, total) => save({ step: `Rewrote ${done} of ${total} scripts…`, progress: 0.1 + 0.8 * (done / total) }));
+      });
+      await save({ step: 'Saving the new scripts…', progress: 0.95 });
+      for (const [index, plan] of plans) {
+        const scene = scenes[index];
+        if (!scene) continue;
+        // The slot on the song stays (length + words under it); the script, shot and cast are new.
+        await writeScene(
+          projectId,
+          scene.id,
+          {
+            title: plan.title,
+            subtitle: plan.subtitle,
+            description: plan.description,
+            prompt: `${plan.prompt}${slowMotionNote(plan.speed, plan.lipSync)}`.slice(0, 2000),
+            shot: plan.shot as SceneRow['shot'],
+            transition: plan.transition as SceneRow['transition'],
+            characterIds: plan.characterIds,
+            costume: plan.costume,
+            location: plan.location,
+            timeOfDay: plan.timeOfDay,
+            lipSync: plan.lipSync,
+            ...(plan.mode ? { mode: plan.mode as MvSceneInput['mode'] } : {}),
+            ...(plan.emotion !== undefined ? { emotion: plan.emotion as MvSceneInput['emotion'] } : {}),
+            ...(plan.intensity !== undefined ? { intensity: intensityLevel(plan.intensity) ?? 2 } : {}),
+          },
+          false,
+        );
+        await applySpeedEffect(scene.id, plan.speed, plan.lipSync);
+      }
+      await autoApprove(projectId);
+      await touch(projectId);
+      const left = copiedSceneIndexes(await loadScenes(projectId)).length;
+      await save({
+        status: 'DONE',
+        step: `${env.BOT_NAME} rewrote ${plans.size} script${plans.size === 1 ? '' : 's'}${free ? ' (free)' : ''}.${left ? ` ${left} still look alike: press Regenerate scripts again.` : ' Every scene is now its own moment.'}`,
+        progress: 1,
+        scenes: plans.size,
+        finishedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      const message = (error instanceof Error ? error.message : String(error)).slice(0, 400);
+      logger.error({ err: error, projectId }, 'regenerating scripts failed');
+      await save({ status: 'FAILED', step: 'Regenerating the scripts stopped.', error: message, finishedAt: new Date().toISOString() });
+    }
+  })();
   return view(auth, workspaceId, projectId);
 }
 
