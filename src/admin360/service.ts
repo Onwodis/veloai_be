@@ -69,7 +69,7 @@ export async function overview(userId: string) {
     lastSeen(userId),
     sql<{ suspendedAt: Date | null; suspendedReason: string | null; deletedAt: Date | null; purgeAfter: Date | null }[]>`SELECT suspended_at, suspended_reason, deleted_at, purge_after FROM users WHERE id = ${userId}`,
     Promise.all(user.memberships.map(async (member) => ({ ...member.workspace, createdAt: member.workspace.createdAt.toISOString(), role: member.role, wallet: await getWallet(member.workspace.id) }))),
-    sql<{ studioProjects: number; musicVideos: number; reelProjects: number; reels: number; creations: number; takes: number; tokensUsed: number; tokensBought: number; revenue: number; payments: number }[]>`
+    sql<{ studioProjects: number; musicVideos: number; reelProjects: number; reels: number; creations: number; takes: number; tokensUsed: number; tokensBought: number; tokensFree: number; revenue: number; payments: number }[]>`
       SELECT
         (SELECT count(*)::int FROM studio_projects WHERE created_by_id = ${userId} AND kind = 'AI_VIDEO') AS studio_projects,
         (SELECT count(*)::int FROM studio_projects WHERE created_by_id = ${userId} AND kind = 'MUSIC_VIDEO') AS music_videos,
@@ -79,6 +79,7 @@ export async function overview(userId: string) {
         (SELECT count(*)::int FROM studio_takes t JOIN studio_projects p ON p.id = t.project_id WHERE p.created_by_id = ${userId} AND t.status = 'READY') AS takes,
         (SELECT COALESCE(sum(-amount), 0)::int FROM token_ledger WHERE workspace_id = ANY(${workspaceIds}::uuid[]) AND type = 'USAGE') AS tokens_used,
         (SELECT COALESCE(sum(amount), 0)::int FROM token_ledger WHERE workspace_id = ANY(${workspaceIds}::uuid[]) AND type = 'PURCHASE') AS tokens_bought,
+        (SELECT COALESCE(sum(amount), 0)::int FROM token_ledger WHERE workspace_id = ANY(${workspaceIds}::uuid[]) AND type = 'GRANT') AS tokens_free,
         (SELECT COALESCE(sum(amount), 0)::bigint FROM payments WHERE user_id = ${userId} AND status = 'SUCCESS' AND mode = 'LIVE')::float AS revenue,
         (SELECT count(*)::int FROM payments WHERE user_id = ${userId} AND status = 'SUCCESS') AS payments`,
     sql<{ usedBytes: number; files: number; quotaOverrideBytes: number | null }[]>`SELECT used_bytes::float AS used_bytes, files, quota_override_bytes::float AS quota_override_bytes FROM storage_accounts WHERE user_id = ${userId}`,
@@ -220,7 +221,9 @@ export async function credit(actorId: string, userId: string, input: { workspace
   const owned = user.memberships.find((member) => member.role === 'OWNER')?.workspace.id;
   const workspaceId = input.workspaceId ?? owned ?? user.memberships[0]?.workspace.id;
   if (!workspaceId || !workspaceIdsOf(user).includes(workspaceId)) throw AppError.badRequest('Pick one of this user’s workspaces.');
-  const wallet = await grant(actorId, workspaceId, input.amount, `${input.amount >= 0 ? 'Credit' : 'Debit'} by super admin: ${input.note}`.slice(0, 255));
+  // Added tokens are free tokens (GRANT in the ledger), labelled so on the user's billing history.
+  const note = input.amount > 0 ? `Free tokens${input.note ? `: ${input.note}` : ''}` : `Removed by super admin: ${input.note}`;
+  const wallet = await grant(actorId, workspaceId, input.amount, note.slice(0, 255));
   logger.info({ actorId, userId, workspaceId, amount: input.amount }, 'super admin adjusted user tokens');
   return { workspaceId, wallet };
 }

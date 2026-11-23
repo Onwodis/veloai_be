@@ -432,45 +432,204 @@ export async function discuss(context: DirectorContext, history: { author: 'CREA
 
 /* ------------------------------------------------------------------ storyboard */
 
-const StoryboardSchema = z.object({
+/*
+ * The storyboard is written in two steps so every scene is its own moment and nothing is cut short:
+ *   1. outline: the whole video as N distinct beats placed on the song (who, where, what happens,
+ *      which words are sung under it), drawn from the song, the vision, the director's room and cast;
+ *   2. scenes: each beat written out in full, a few per call in parallel (one call can't hold
+ *      20-30 detailed scenes, which is what used to collapse a song into one repeated scene).
+ * The outline is checked for repeats and retried once with the repeats named.
+ */
+const OutlineSchema = z.object({
   logline: z.string().describe('One-sentence story of the video'),
-  scenes: z.array(
-    PlannedScene.extend({
+  arc: z.string().describe('How the story and performance build across the song: set-up, rise, peak on the hooks, turn at the bridge, resolution. 2-4 sentences.'),
+  beats: z.array(
+    z.object({
       kind: z.enum(['INTRO', 'STORY', 'OUTRO']),
-      startSec: z.number().describe('Where the scene starts, in seconds into the video, on a section change or bar line from the song map'),
+      startSec: z.number().describe('Where this beat starts in the video, in seconds, on a section change or bar line from the song map'),
+      title: z.string().describe('2-5 word name, different from every other beat'),
+      beat: z.string().describe('What happens in this moment, concretely (action, who, where, what changes since the previous beat). 1-2 sentences, never a repeat of another beat.'),
+      lyricCue: z.string().describe('The words sung under this beat (from the song map), or the section name for instrumental parts'),
+      location: z.string().describe('Short location name'),
+      mode: PlannedScene.shape.mode,
+      characterIndexes: z.array(z.number().int()).describe('Indexes (C0, C1…) of the characters in this beat'),
     }),
   ),
 });
+type Outline = z.infer<typeof OutlineSchema>;
+type OutlineBeat = Outline['beats'][number];
 
-export async function storyboard(
-  context: DirectorContext,
-  discussion: string,
-  sceneCount?: number,
-): Promise<{ logline: string; scenes: (PlannedMvScene & { kind: 'INTRO' | 'STORY' | 'OUTRO' })[]; engine: string }> {  const { data, engine } = await parse(
+const BatchSchema = z.object({
+  scenes: z.array(PlannedScene.extend({ kind: z.enum(['INTRO', 'STORY', 'OUTRO']), startSec: z.number() })),
+});
+type BatchScene = z.infer<typeof BatchSchema>['scenes'][number];
+
+const norm = (text: string): string => text.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim().slice(0, 90);
+
+/** Beats that repeat an earlier one (same title or same action), by index. */
+function repeatedBeats(beats: { title: string; beat: string }[]): number[] {
+  const seen = new Set<string>();
+  const repeats: number[] = [];
+  beats.forEach((item, index) => {
+    const keys = [`t:${norm(item.title)}`, `b:${norm(item.beat)}`];
+    if (keys.some((key) => seen.has(key))) repeats.push(index);
+    keys.forEach((key) => seen.add(key));
+  });
+  return repeats;
+}
+
+/** The context with the current scenes de-duplicated (copies from an older build must not be "kept"). */
+function withDistinctScenes(context: DirectorContext): DirectorContext {
+  const seen = new Set<string>();
+  const scenes = context.scenes.filter((scene) => {
+    const key = norm(scene.description);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return { ...context, scenes };
+}
+
+const storyboardRole = (): string =>
+  `You are ${env.BOT_NAME}, the AI director, writing the storyboard of a music video. Listen to the song through its song map: the sections, the energy ` +
+  "and above all the words sung in each part. Draw on the artist's vision, mood and direction settings, the director's room, the cast and the place, " +
+  'and build a story that resonates with the song and moves forward with it, intercut with performance. ';
+
+async function outlineBeats(context: DirectorContext, discussion: string, count: number, feedback?: string): Promise<Outline> {
+  const { data } = await parse(
     'music-video',
-    StoryboardSchema,
-    `You are ${env.BOT_NAME}, the AI director, locking the storyboard of a music video. Build a story that resonates with the song: its lyrics, emotion and structure. ` +
-      'It MUST open with exactly one INTRO scene and close with exactly one OUTRO scene; everything between is STORY. ' +
-      "Keep every scene the artist approved, in spirit and order, improving only what the director's room agreed; add scenes where the song needs them. " +
-      'Plan on the song map: every scene has a startSec, scenes follow each other with no gaps, the last one ends at the end of the video, and each scene\'s lyric is the words in the map under it. ' +
-      'Follow the artist\'s direction settings for the performance share, cutting pace and lyric approach. Set lipSync true exactly for PERFORMANCE scenes. ' +
+    OutlineSchema,
+    storyboardRole() +
+      `Plan exactly ${count} beats: exactly one INTRO first, exactly one OUTRO last, STORY between. ` +
+      'Every beat is a different moment: a new action, place, angle or turn in the story; the same location may come back, the same action never does. ' +
+      'Place them on the song map with startSec in order, no gaps, the last ending at the end of the video; each beat covers its own lines, ' +
+      'so what happens follows what is being sung (a line about leaving shows the leaving, a hook gets the biggest performance moment). ' +
+      "The <scenes> list is the current draft and the artist's own ideas: keep the artist's ideas that fit, in spirit and order, and never repeat a scene. " +
+      'Set mode PERFORMANCE where the artist sings to camera. ' +
+      `${PRO_RULES} ${RULES}`,
+    [
+      {
+        type: 'text',
+        text:
+          `${contextText(context)}\n\n<directors_room_summary>\n${discussion.slice(0, 8000) || 'no discussion'}\n</directors_room_summary>` +
+          (feedback ? `\n\n<fix>${feedback}</fix>` : ''),
+      },
+    ],
+  );
+  return data;
+}
+
+function beatLines(beats: OutlineBeat[], start: number, end: number): string {
+  const from = Math.max(0, start);
+  return beats
+    .slice(from, Math.max(from, end))
+    .map(
+      (item, offset) =>
+        `B${from + offset} [${item.kind}${item.mode ? ` · ${item.mode}` : ''}] at ${item.startSec}s · ${item.title} @ ${item.location}: ${item.beat} ` +
+        `(under: ${item.lyricCue}) cast: ${item.characterIndexes.map((index) => `C${index}`).join(', ') || 'none'}`,
+    )
+    .join('\n');
+}
+
+async function writeBatch(context: DirectorContext, outline: Outline, from: number, to: number): Promise<BatchScene[]> {
+  const beats = outline.beats;
+  const { data } = await parse(
+    'music-video',
+    BatchSchema,
+    storyboardRole() +
+      `Write out beats B${from} to B${to - 1} of the outline as full scenes: exactly one scene per beat, in order, keeping each beat's kind, startSec, cast and idea. ` +
+      'Each scene has its own action, framing and camera move; it continues from the beat before it and leads into the next, and never repeats it. ' +
+      'The lyric field is the words under that beat. Set lipSync true exactly for PERFORMANCE scenes. ' +
       `${PRO_RULES} ${RULES} ${shotGuide}`,
     [
       {
         type: 'text',
-        text: `${contextText(context)}\n\n<directors_room_summary>\n${discussion.slice(0, 8000) || 'no discussion'}\n</directors_room_summary>${sceneCount ? `\nUse about ${sceneCount} scenes in total.` : ''}`,
+        text:
+          `${contextText(context)}\n\n<outline logline="${outline.logline.replace(/"/g, "'")}">\n<arc>${outline.arc}</arc>\n` +
+          (from > 0 ? `<before>\n${beatLines(beats, from - 2, from)}\n</before>\n` : '') +
+          `<write_these>\n${beatLines(beats, from, to)}\n</write_these>\n` +
+          (to < beats.length ? `<after>\n${beatLines(beats, to, to + 2)}\n</after>\n` : '') +
+          '</outline>',
       },
     ],
   );
-  // Durations from the planned start times (the model times scenes to the song map), else its own durations.
-  const ordered = [...data.scenes].sort((a, b) => a.startSec - b.startSec);
-  const timed = ordered.every((scene, index) => index === 0 || scene.startSec > ordered[index - 1]!.startSec);
+  return data.scenes;
+}
+
+/** A scene from its outline beat alone (only if a batch came back short twice). */
+function fromBeat(item: OutlineBeat): BatchScene {
+  return {
+    kind: item.kind,
+    startSec: item.startSec,
+    title: item.title,
+    subtitle: item.lyricCue.slice(0, 100),
+    description: item.beat,
+    prompt: `${item.beat} Location: ${item.location}.`,
+    shot: SHOT_IDS[0],
+    transition: TRANSITION_IDS[0],
+    speed: 'normal',
+    durationSec: 6,
+    location: item.location,
+    timeOfDay: '',
+    costume: '',
+    characterIndexes: item.characterIndexes,
+    lipSync: item.mode === 'PERFORMANCE' && item.characterIndexes.length > 0,
+    lyric: item.lyricCue,
+    mode: item.mode,
+    why: '',
+  } as BatchScene;
+}
+
+export async function storyboard(
+  rawContext: DirectorContext,
+  discussion: string,
+  sceneCount?: number,
+): Promise<{ logline: string; scenes: (PlannedMvScene & { kind: 'INTRO' | 'STORY' | 'OUTRO' })[]; engine: string }> {
+  const context = withDistinctScenes(rawContext);
+  const count = Math.max(3, Math.min(60, sceneCount ?? (context.songSeconds ? Math.ceil(context.songSeconds / 7) : 10)));
+
+  // 1. Outline, retried once if it came back short or repetitive.
+  const problems = (plan: Outline): string | null => {
+    const repeats = repeatedBeats(plan.beats);
+    const short = plan.beats.length < Math.ceil(count * 0.75);
+    if (!repeats.length && !short) return null;
+    return [
+      short ? `You planned ${plan.beats.length} beats; plan ${count}.` : '',
+      repeats.length ? `Beats ${repeats.map((index) => `B${index} ("${plan.beats[index]!.title}")`).join(', ')} repeat earlier beats: give each its own moment from the words sung under it.` : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+  };
+  let outline = await outlineBeats(context, discussion, count);
+  const issue = problems(outline);
+  if (issue) {
+    const second = await outlineBeats(context, discussion, count, issue);
+    if (!problems(second) || second.beats.length > outline.beats.length) outline = second;
+  }
+  outline.beats.sort((a, b) => a.startSec - b.startSec);
+
+  // 2. Full scenes, a few beats per call, in parallel (one retry per batch).
+  const SIZE = 6;
+  const ranges: [number, number][] = [];
+  for (let from = 0; from < outline.beats.length; from += SIZE) ranges.push([from, Math.min(outline.beats.length, from + SIZE)]);
+  const batches = await Promise.all(
+    ranges.map(async ([from, to]) => {
+      let written = await writeBatch(context, outline, from, to).catch(() => [] as BatchScene[]);
+      if (written.length < to - from) written = await writeBatch(context, outline, from, to).catch(() => written);
+      // One scene per beat, in order; anything still missing falls back to the beat itself.
+      return outline.beats.slice(from, to).map((item, offset) => {
+        const scene = written[offset];
+        return scene ? { ...scene, kind: item.kind, startSec: item.startSec } : fromBeat(item);
+      });
+    }),
+  );
+  const planned = batches.flat();
+
+  // Durations from the planned start times (the beats sit on the song map), else the scene's own.
   const end = context.songSeconds ?? 0;
-  const scenes = (timed ? ordered : data.scenes).map(({ characterIndexes, startSec: _start, ...scene }, index, list) => {
-    const next = list[index + 1]?.startSec ?? (end > 0 ? end : _start + scene.durationSec);
-    const fromStarts = timed ? next - _start : scene.durationSec;
-    // The scene keeps its real span on the song (a long verse stays long): fitToSong splits it into
-    // consecutive parts that follow the words, instead of cutting it short and padding with copies.
+  const scenes = planned.map(({ characterIndexes, startSec, ...scene }, index, list) => {
+    const next = list[index + 1]?.startSec ?? (end > 0 ? end : startSec + scene.durationSec);
+    const fromStarts = next - startSec;
     const span = fromStarts > 0 ? Math.round(Math.min(120, Math.max(3, fromStarts)) * 2) / 2 : clampDuration(scene.durationSec);
     return { ...scene, durationSec: span, characterIds: idsFor(characterIndexes, context) };
   });
@@ -480,7 +639,7 @@ export async function storyboard(
   scenes.forEach((scene, index) => {
     if (index > 0 && index < scenes.length - 1) scene.kind = 'STORY';
   });
-  return { logline: data.logline, scenes, engine };
+  return { logline: outline.logline, scenes, engine: 'Claude' };
 }
 
 /* ------------------------------------------------------------------ lyrics */

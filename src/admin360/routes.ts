@@ -41,9 +41,10 @@ const creditSchema = z.strictObject({
     .min(-10_000_000)
     .max(10_000_000)
     .refine((value) => value !== 0, { error: 'Enter a non-zero amount' }),
-  note: z.string().trim().min(3, { error: 'Say why (it is shown in the ledger)' }).max(200),
+  // Optional when adding (recorded as "Free tokens"); removing tokens must say why.
+  note: z.string().trim().max(200).default(''),
   workspaceId: z.uuid().optional(),
-});
+}).refine((input) => input.amount > 0 || input.note.length >= 3, { error: 'Say why you are removing tokens (it is shown in the ledger)', path: ['note'] });
 const suspendSchema = z.strictObject({ reason: z.string().trim().min(3).max(300) });
 const deleteUserSchema = z.strictObject({ confirmEmail: z.string().trim().min(3).max(320) });
 const quotaSchema = z.strictObject({ quotaBytes: z.number().int().min(0).max(10 * 1024 ** 4).nullable() });

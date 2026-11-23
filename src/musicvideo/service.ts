@@ -19,6 +19,7 @@
  * before it have what they need (openStage). Reopening a stage still exists
  * to clear its approval and every later one on purpose.
  */
+import { env } from '../config/env.js';
 import { randomUUID } from 'node:crypto';
 import type { AuthContext } from '../middleware/authenticate.js';
 import { deleteObject, deletePrefix, getObjectStream, keys, readUrl } from '../services/storage.service.js';
@@ -1354,6 +1355,14 @@ export async function buildStoryboard(auth: AuthContext, workspaceId: string, pr
   await access(auth, workspaceId, true);
   const { project, mv } = await load(workspaceId, projectId);
   assertStage(mv, 'SCENES', 'STORYBOARD');
+  // The director writes to the words: a song that was never transcribed is transcribed first.
+  if (!mv.lyrics) {
+    const transcribing = mv.lyricsJob?.status === 'RUNNING' && Date.now() - new Date(mv.lyricsJob.startedAt).getTime() < LYRICS_STALE_MS;
+    if (!transcribing) await transcribeLyrics(auth, workspaceId, projectId);
+    throw AppError.conflict(
+      `${env.BOT_NAME} is listening to the song first: the lyrics are being transcribed (about a minute). Write the scenes again when that's done, so every scene follows the words sung under it.`,
+    );
+  }
   const [context, messages, settings] = await Promise.all([
     directorContext(project, mv),
     sql<MessageRow[]>`SELECT * FROM mv_messages WHERE project_id = ${projectId} ORDER BY created_at`,
@@ -1406,6 +1415,7 @@ export async function buildStoryboard(auth: AuthContext, workspaceId: string, pr
 function fitToSong(
   scenes: {
     kind: 'INTRO' | 'STORY' | 'OUTRO';
+    title: string;
     durationSec: number;
     description: string;
     prompt: string;
@@ -1444,6 +1454,7 @@ function fitToSong(
       kind: part === 0 ? scene.kind : scene.kind === 'OUTRO' ? 'OUTRO' : 'STORY',
       durationSec: part === parts - 1 ? half(scene.durationSec - each * (parts - 1)) : each,
       characterIds: [...scene.characterIds],
+      title: part === 0 ? scene.title : `${scene.title.slice(0, 70)} · ${part + 1}/${parts}`,
       description: part === 0 ? scene.description : `${scene.description} The moment moves on (part ${part + 1} of ${parts}): what happens follows the words heard here.`,
       prompt:
         part === 0
