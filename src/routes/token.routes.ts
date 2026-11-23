@@ -41,6 +41,7 @@ workspaceTokenRouter.use(authenticate);
 workspaceTokenRouter.get('/', validate({ params: tokenWorkspaceParamsSchema }), tokens.overview);
 workspaceTokenRouter.get('/wallet', validate({ params: tokenWorkspaceParamsSchema }), tokens.wallet);
 workspaceTokenRouter.post('/preflight', validate({ params: tokenWorkspaceParamsSchema, body: estimateInputSchema }), tokens.preflight);
+workspaceTokenRouter.post('/proceed', validate({ params: tokenWorkspaceParamsSchema }), tokens.proceedLowBalance);
 workspaceTokenRouter.post('/reservations', validate({ params: tokenWorkspaceParamsSchema, body: reserveSchema }), tokens.reserve);
 workspaceTokenRouter.post('/reservations/:reservationId/settle', validate({ params: reservationParamsSchema, body: settleSchema }), tokens.settle);
 workspaceTokenRouter.post('/reservations/:reservationId/release', validate({ params: reservationParamsSchema }), tokens.release);

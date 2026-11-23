@@ -56,6 +56,12 @@ export async function preflight(req: Request, res: Response): Promise<void> {
   res.json(await tokens.preflight(requireAuth(req), workspaceId, validBody(req, estimateInputSchema)));
 }
 
+/** "Continue with my balance" after the low-balance warning. */
+export async function proceedLowBalance(req: Request, res: Response): Promise<void> {
+  const { workspaceId } = validParams(res, tokenWorkspaceParamsSchema);
+  res.json(await tokens.allowLowBalance(requireAuth(req), workspaceId));
+}
+
 export async function reserve(req: Request, res: Response): Promise<void> {
   const { workspaceId } = validParams(res, tokenWorkspaceParamsSchema);
   const { taskType, ...input } = validBody(req, reserveSchema);

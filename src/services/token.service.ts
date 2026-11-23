@@ -190,13 +190,37 @@ const reservationView = (row: {
  */
 async function holdTokens(tx: Tx, workspaceId: string, price: number, estimate: number): Promise<number | null> {
   await ensureWallet(tx, workspaceId);
-  const [wallet] = await tx.$queryRaw<Array<{ balance: number; held: number }>>`
-    SELECT balance, held FROM token_wallets WHERE workspace_id = ${workspaceId}::uuid FOR UPDATE`;
+  const [wallet] = await tx.$queryRaw<Array<{ balance: number; held: number; proceeding: boolean }>>`
+    SELECT balance, held, coalesce(proceed_until > now(), false) AS proceeding FROM token_wallets WHERE workspace_id = ${workspaceId}::uuid FOR UPDATE`;
   const available = (wallet?.balance ?? 0) - (wallet?.held ?? 0);
-  if (available < price) return null;
+  if (available < price) {
+    // "Risk my balance and continue" (the user saw the warning and chose to go ahead): hold what is
+    // there. Multi-step work runs until the balance is used up, then stops; nothing is ever charged
+    // beyond the balance (settling caps the charge at it).
+    if (!wallet?.proceeding || available <= 0) return null;
+    await tx.$executeRaw`UPDATE token_wallets SET held = held + ${available}, updated_at = now() WHERE workspace_id = ${workspaceId}::uuid`;
+    return available;
+  }
   const hold = Math.max(price, Math.min(estimate, available));
   await tx.$executeRaw`UPDATE token_wallets SET held = held + ${hold}, updated_at = now() WHERE workspace_id = ${workspaceId}::uuid`;
   return hold;
+}
+
+/** Minutes a "continue with my balance" choice lasts for the workspace (covers background steps too). */
+const PROCEED_MINUTES = 15;
+
+/**
+ * The user saw the low-balance warning and chose to go ahead with what they have: for the next
+ * few minutes tasks in this workspace hold the available balance instead of being refused.
+ */
+export async function allowLowBalance(auth: AuthContext, workspaceId: string): Promise<{ until: string; available: number }> {
+  if (auth.role !== 'SUPER_ADMIN') await requireMembership(auth.userId, workspaceId, ['OWNER', 'EDITOR']);
+  await ensureWallet(prisma, workspaceId);
+  const until = new Date(Date.now() + PROCEED_MINUTES * 60_000);
+  await prisma.$executeRaw`UPDATE token_wallets SET proceed_until = ${until}, updated_at = now() WHERE workspace_id = ${workspaceId}::uuid`;
+  const wallet = await getWallet(workspaceId);
+  logger.info({ workspaceId, userId: auth.userId, available: wallet.available }, 'low balance: user chose to continue with their balance');
+  return { until: until.toISOString(), available: wallet.available };
 }
 
 /**
@@ -230,8 +254,8 @@ export async function reserve(
       throw new AppError(
         402,
         'INSUFFICIENT_TOKENS',
-        `This task costs ${check.estimate.subtotal.toLocaleString('en')} tokens; the workspace has ${check.wallet.available.toLocaleString('en')} available (${shortfall.toLocaleString('en')} short). Buy tokens to continue.`,
-        { required: check.estimate.subtotal, available: check.wallet.available, shortfall },
+        `This task costs ${check.estimate.subtotal.toLocaleString('en')} tokens; the workspace has ${check.wallet.available.toLocaleString('en')} available (${shortfall.toLocaleString('en')} short). Buy tokens, or risk your balance and continue.`,
+        { required: check.estimate.subtotal, available: check.wallet.available, shortfall, workspaceId, canProceed: check.wallet.available > 0 },
       );
     }
     return tx.tokenReservation.create({
@@ -275,8 +299,8 @@ export async function reserveTokens(
       throw new AppError(
         402,
         'INSUFFICIENT_TOKENS',
-        `This costs ${price.toLocaleString('en')} tokens; the workspace has ${wallet.available.toLocaleString('en')} available (${shortfall.toLocaleString('en')} short). Buy tokens to continue.`,
-        { required: price, available: wallet.available, shortfall },
+        `This costs ${price.toLocaleString('en')} tokens; the workspace has ${wallet.available.toLocaleString('en')} available (${shortfall.toLocaleString('en')} short). Buy tokens, or risk your balance and continue.`,
+        { required: price, available: wallet.available, shortfall, workspaceId, canProceed: wallet.available > 0 },
       );
     }
     return tx.tokenReservation.create({ data: { ...data, estimated: held } });
@@ -318,15 +342,20 @@ async function closeReservation(reservationId: string, workspaceId: string, outc
       // returned, so charge the balance directly instead of losing the charge.
       const updated = await tx.tokenReservation.update({ where: { id: row.id }, data: { status: 'SETTLED', actual: charge, closedAt: new Date() } });
       if (!row.unmetered && charge > 0) {
-        await applyEntry(tx, {
-          workspaceId,
-          type: 'USAGE',
-          amount: -charge,
-          reference: row.id,
-          taskType: row.taskType,
-          note: `${note ?? row.taskType} (after hold expiry)`.slice(0, 255),
-          allowOverdraw: true,
-        });
+        // Never more than the balance (the charge stops at what is available).
+        const [wallet] = await tx.$queryRaw<Array<{ balance: number; held: number }>>`
+          SELECT balance, held FROM token_wallets WHERE workspace_id = ${workspaceId}::uuid FOR UPDATE`;
+        const billed = Math.min(charge, Math.max(0, (wallet?.balance ?? 0) - (wallet?.held ?? 0)));
+        if (billed > 0) {
+          await applyEntry(tx, {
+            workspaceId,
+            type: 'USAGE',
+            amount: -billed,
+            reference: row.id,
+            taskType: row.taskType,
+            note: `${note ?? row.taskType} (after hold expiry)`.slice(0, 255),
+          });
+        }
       }
       logger.warn({ reservationId, charge }, 'settled an expired hold');
       return reservationView(updated);
@@ -340,7 +369,16 @@ async function closeReservation(reservationId: string, workspaceId: string, outc
     if (!row.unmetered) {
       await tx.$executeRaw`UPDATE token_wallets SET held = GREATEST(0, held - ${row.estimated}), updated_at = now() WHERE workspace_id = ${workspaceId}::uuid`;
       if (charge > 0) {
-        await applyEntry(tx, { workspaceId, type: 'USAGE', amount: -charge, reference: row.id, taskType: row.taskType, ...(note ? { note: note.slice(0, 255) } : {}) });
+        // Never more than the balance: a task the user chose to run on their balance ("risk my
+        // balance and continue") can cost more than was left; the charge stops at what they have.
+        const [wallet] = await tx.$queryRaw<Array<{ balance: number; held: number }>>`
+          SELECT balance, held FROM token_wallets WHERE workspace_id = ${workspaceId}::uuid FOR UPDATE`;
+        const room = Math.max(0, (wallet?.balance ?? 0) - (wallet?.held ?? 0));
+        const billed = Math.min(charge, room);
+        if (billed < charge) logger.warn({ reservationId, charge, billed }, 'charge capped at the balance');
+        if (billed > 0) {
+          await applyEntry(tx, { workspaceId, type: 'USAGE', amount: -billed, reference: row.id, taskType: row.taskType, ...(note ? { note: note.slice(0, 255) } : {}) });
+        }
       }
     } else if (outcome === 'SETTLED') {
       await tx.tokenLedger.create({
