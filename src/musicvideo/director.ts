@@ -709,9 +709,12 @@ export async function rewriteScenes(
   };
 
   let pending = [...indexes];
+  let lastError: unknown = null;
   for (let round = 0; round < 3 && pending.length; round += 1) {
     for (let at = 0; at < pending.length; at += SIZE) {
-      await writeGroup(pending.slice(at, at + SIZE)).catch(() => undefined);
+      await writeGroup(pending.slice(at, at + SIZE)).catch((error: unknown) => {
+        lastError = error;
+      });
       await onProgress?.(Math.min(indexes.length, out.size), indexes.length);
     }
     // Next round: anything not written, or still repeating another scene's title or script.
@@ -728,6 +731,8 @@ export async function rewriteScenes(
       const title = key(titles.get(index) ?? '');
       return seenTitles.get(title) !== index || seenScripts.get(key(board.scenes[index]!.description)) !== index;
     });
+    // Every call failing (the AI is down, a key problem…): stop and say why instead of "done, 0 rewritten".
+    if (out.size === 0 && lastError) throw lastError;
   }
   return out;
 }

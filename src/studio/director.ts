@@ -20,7 +20,9 @@ import { ffmpeg } from '../media/ffmpeg.js';
 import { resolveEngine } from '../services/ai.service.js';
 import { downloadToFile } from '../services/storage.service.js';
 import { recordLlmUsage, type UsageSource } from '../launch/wallet.js';
+import { reportAiError } from '../services/aiAlerts.js';
 import { AppError } from '../utils/AppError.js';
+import { logger } from '../utils/logger.js';
 import { SHOT_IDS, SHOTS, TRANSITION_IDS } from './cinema.js';
 
 const FALLBACK_MODELS = new Set(['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5-5']);
@@ -79,8 +81,44 @@ export async function parse<S extends z.ZodType>(source: UsageSource, schema: S,
     });
     return response;
   };
-  let response = await ask(content);
-  if (response.stop_reason === 'refusal') response = await ask([...content, { type: 'text', text: ON_REFUSAL }]);
+  // Temporary API trouble (rate limit, overloaded, a dropped connection) gets two more tries with a
+  // pause, on top of the SDK's own quick retries; every failure is logged and reported to the super
+  // admins (AI error alerts), so a director call never fails silently.
+  const transient = (error: unknown): boolean =>
+    error instanceof Anthropic.RateLimitError || error instanceof Anthropic.InternalServerError || error instanceof Anthropic.APIConnectionError || (error instanceof Anthropic.APIError && (error.status === 529 || error.status === 503));
+  const call = async (messages: Anthropic.Beta.BetaContentBlockParam[]) => {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await ask(messages);
+      } catch (error) {
+        const status = error instanceof Anthropic.APIError ? error.status : undefined;
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error({ err: error, source, model, status, attempt }, 'Claude call failed');
+        if (transient(error) && attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 5000 * (attempt + 1)));
+          continue;
+        }
+        // Out of API credit: nothing the user can do; the super admins get the alert to top up.
+        const noCredit = /credit balance is too low|billing|insufficient.?(credit|funds|quota)/i.test(message);
+        reportAiError({
+          service: 'LLM (Anthropic)',
+          endpoint: model,
+          error: noCredit ? `Out of API credit: top up the Anthropic account (Plans & Billing). ${message}`.slice(0, 400) : `${status ?? ''} ${message}`.trim().slice(0, 400),
+          where: `the ${source} director`,
+        });
+        if (noCredit) {
+          throw new AppError(503, 'INTERNAL_ERROR', `${env.BOT_NAME} is unavailable right now (the AI service needs topping up). The team has been alerted; nothing was charged. Try again later.`);
+        }
+        throw new AppError(
+          502,
+          'INTERNAL_ERROR',
+          `The AI director could not answer${status ? ` (error ${status})` : ''}: ${message.slice(0, 200)}. Try again in a minute; nothing was charged for it.`,
+        );
+      }
+    }
+  };
+  let response = await call(content);
+  if (response.stop_reason === 'refusal') response = await call([...content, { type: 'text', text: ON_REFUSAL }]);
   if (response.stop_reason === 'refusal') {
     throw new AppError(422, 'BAD_REQUEST', 'The AI couldn’t do this one as written, even as a tasteful version. Describe the look in styling terms (body type, wardrobe, attitude) rather than anything explicit, and try again.');
   }

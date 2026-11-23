@@ -592,7 +592,10 @@ export async function startScriptRegeneration(auth: AuthContext, workspaceId: st
       const left = copiedSceneIndexes(await loadScenes(projectId)).length;
       await save({
         status: 'DONE',
-        step: `${env.BOT_NAME} rewrote ${plans.size} script${plans.size === 1 ? '' : 's'}${free ? ' (free)' : ''}.${left ? ` ${left} still look alike: press Regenerate scripts again.` : ' Every scene is now its own moment.'}`,
+        step:
+          `${env.BOT_NAME} rewrote ${plans.size} of ${targets.length} script${targets.length === 1 ? '' : 's'}${free ? ' (free)' : ''}.` +
+          (plans.size < targets.length ? ` ${targets.length - plans.size} could not be rewritten this time (the AI did not answer for them).` : '') +
+          (left ? ` ${left} still look alike: press Regenerate scripts again.` : ' Every scene is now its own moment.'),
         progress: 1,
         scenes: plans.size,
         finishedAt: new Date().toISOString(),
