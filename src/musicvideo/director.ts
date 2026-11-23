@@ -659,8 +659,9 @@ const RewriteSchema = z.object({
 /**
  * Rewrites the scripts of the scenes at `indexes` (copies of other scenes, or ones the artist
  * picked) so each becomes its own moment for its slot on the song: its time, the words under it,
- * and the scenes around it. Everything else on the board stays as it is. A few scenes per call,
- * in parallel. Returns the new plans keyed by index.
+ * and the scenes around it. Everything else on the board stays as it is. Batches run one after
+ * another and each sees the scripts already rewritten, so no two new scenes repeat each other;
+ * anything still missing or still repeating is rewritten again (up to two more rounds).
  */
 export async function rewriteScenes(
   context: DirectorContext,
@@ -668,42 +669,66 @@ export async function rewriteScenes(
   onProgress?: (done: number, total: number) => Promise<void> | void,
 ): Promise<Map<number, PlannedMvScene>> {
   const out = new Map<number, PlannedMvScene>();
+  // A working copy of the board: rewritten scenes replace the copies as we go.
+  const board = { ...context, scenes: context.scenes.map((scene) => ({ ...scene })) };
+  const titles = new Map<number, string>();
   const SIZE = 6;
-  const groups: number[][] = [];
-  for (let at = 0; at < indexes.length; at += SIZE) groups.push(indexes.slice(at, at + SIZE));
-  let done = 0;
-  await Promise.all(
-    groups.map(async (group) => {
-      const slots = group
-        .map((index) => {
-          const scene = context.scenes[index]!;
-          const start = context.scenes.slice(0, index).reduce((sum, item) => sum + item.durationSec, 0);
-          return `S${index} [${scene.kind}] at ${start.toFixed(1)}s for ${scene.durationSec}s${scene.lyric ? ` · under: "${scene.lyric.slice(0, 200)}"` : ''}`;
-        })
-        .join('\n');
-      const ask = () =>
-        parse(
-          'music-video',
-          RewriteSchema,
-          `You are ${env.BOT_NAME}, the AI director, fixing a music-video storyboard where some scenes are copies of another scene. ` +
-            'Write a new script for each scene listed in <rewrite>: one scene per index, its own moment on the song. Keep its kind, its place and length on the song and the words under it; ' +
-            'make what happens follow those words and continue the story from the scene before it into the scene after it (see <scenes>). ' +
-            'Every rewritten scene must differ from every other scene on the board: a new action, place, angle or turn in the story, never the same title or script. ' +
-            "Stay true to the artist's vision, mood, cast and place. Set lipSync true exactly for PERFORMANCE scenes. " +
-            `${PRO_RULES} ${RULES} ${shotGuide}`,
-          [{ type: 'text', text: `${contextText(context)}\n\n<rewrite>\n${slots}\n</rewrite>` }],
-        );
-      const { data } = await ask().catch(() => ask());
-      data.scenes.forEach((item, position) => {
-        const index = group.includes(item.index) ? item.index : group[position];
-        if (index === undefined || out.has(index)) return;
-        const { characterIndexes, index: _index, ...scene } = item;
-        out.set(index, { ...scene, characterIds: idsFor(characterIndexes, context) });
-      });
-      done += group.length;
-      await onProgress?.(done, indexes.length);
-    }),
-  );
+  const key = (text: string): string => text.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim().slice(0, 90);
+
+  const writeGroup = async (group: number[]): Promise<void> => {
+    const slots = group
+      .map((index) => {
+        const scene = board.scenes[index]!;
+        const start = board.scenes.slice(0, index).reduce((sum, item) => sum + item.durationSec, 0);
+        return `S${index} [${scene.kind}] at ${start.toFixed(1)}s for ${scene.durationSec}s${scene.lyric ? ` · under: "${scene.lyric.slice(0, 200)}"` : ''}`;
+      })
+      .join('\n');
+    const used = [...titles.values()].map((title) => `"${title}"`).join(', ');
+    const ask = () =>
+      parse(
+        'music-video',
+        RewriteSchema,
+        `You are ${env.BOT_NAME}, the AI director, fixing a music-video storyboard where some scenes are copies of another scene. ` +
+          'Write a new script for each scene listed in <rewrite>: exactly one scene per index, its own moment on the song. Keep its kind, its place and length on the song and the words under it; ' +
+          'make what happens follow those words and continue the story from the scene before it into the scene after it (see <scenes>). ' +
+          'Every rewritten scene must differ from every other scene on the board and from each other: a new action, place, angle or turn in the story, never the same title or script. ' +
+          "Stay true to the artist's vision, mood, cast and place. Set lipSync true exactly for PERFORMANCE scenes. " +
+          `${PRO_RULES} ${RULES} ${shotGuide}`,
+        [{ type: 'text', text: `${contextText(board)}\n\n${used ? `<titles_taken>${used}</titles_taken>\n` : ''}<rewrite>\n${slots}\n</rewrite>` }],
+      );
+    const { data } = await ask().catch(() => ask());
+    data.scenes.forEach((item, position) => {
+      const index = group.includes(item.index) ? item.index : group[position];
+      if (index === undefined) return;
+      const { characterIndexes, index: _index, ...scene } = item;
+      out.set(index, { ...scene, characterIds: idsFor(characterIndexes, context) });
+      titles.set(index, scene.title);
+      // The board now shows the new script, so the next batch builds on it.
+      board.scenes[index] = { ...board.scenes[index]!, description: scene.description, prompt: scene.prompt, location: scene.location, costume: scene.costume };
+    });
+  };
+
+  let pending = [...indexes];
+  for (let round = 0; round < 3 && pending.length; round += 1) {
+    for (let at = 0; at < pending.length; at += SIZE) {
+      await writeGroup(pending.slice(at, at + SIZE)).catch(() => undefined);
+      await onProgress?.(Math.min(indexes.length, out.size), indexes.length);
+    }
+    // Next round: anything not written, or still repeating another scene's title or script.
+    const seenTitles = new Map<string, number>();
+    const seenScripts = new Map<string, number>();
+    board.scenes.forEach((scene, index) => {
+      const script = key(scene.description);
+      if (!seenScripts.has(script)) seenScripts.set(script, index);
+      const title = titles.get(index);
+      if (title && !seenTitles.has(key(title))) seenTitles.set(key(title), index);
+    });
+    pending = indexes.filter((index) => {
+      if (!out.has(index)) return true;
+      const title = key(titles.get(index) ?? '');
+      return seenTitles.get(title) !== index || seenScripts.get(key(board.scenes[index]!.description)) !== index;
+    });
+  }
   return out;
 }
 
