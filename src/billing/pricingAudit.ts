@@ -30,6 +30,15 @@ export function zoneOf(margin: number | null): MarginZone {
   return 'greedy';
 }
 
+/** A whole amount in the platform currency (super admin setting), e.g. "₦20,000" or "$15". */
+export function money(amount: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat('en', { style: 'currency', currency, currencyDisplay: 'narrowSymbol', maximumFractionDigits: Number.isInteger(amount) ? 0 : 2 }).format(amount);
+  } catch {
+    return `${currency} ${amount.toLocaleString('en')}`;
+  }
+}
+
 const marginOf = (sell: number, cost: number): number | null => (sell > 0 ? Math.round(((sell - cost) / sell) * 1000) / 10 : null);
 const priceFor = (cost: number, margin: number): number => cost / (1 - margin / 100);
 
@@ -97,12 +106,12 @@ export async function pricingAudit() {
     findings.push({
       level: filmMargin < 0 ? 'critical' : 'warning',
       title: filmMargin < 0 ? 'YouTube films lose money' : 'YouTube films have a thin margin',
-      detail: `30 s of film costs about ₦${Math.round(filmCost / minorPerUnit).toLocaleString('en')} to make (US$${filmUsd30.toFixed(2)}) and brings in about ₦${Math.round(filmRevenue / minorPerUnit).toLocaleString('en')} at the cheapest token (${filmMargin}% margin).`,
-      fix: `Raise the price to about ₦${recommendedPer30.toLocaleString('en')} per 30 s, or move scenes to a cheaper video model.`,
+      detail: `30 s of film costs about ${money(Math.round(filmCost / minorPerUnit), economics.currency)} to make (US$${filmUsd30.toFixed(2)}) and brings in about ${money(Math.round(filmRevenue / minorPerUnit), economics.currency)} at the cheapest token (${filmMargin}% margin).`,
+      fix: `Raise the price to about ${money(recommendedPer30, economics.currency)} per 30 s, or move scenes to a cheaper video model.`,
     });
   }
   if (listPerToken > reference.floorPerToken * 1.05) {
-    findings.push({ level: 'warning', title: 'YouTube token rate is above what tokens sell for', detail: `YouTube converts ₦${youtube.nairaPerToken} per token, but the cheapest pack sells a token for ₦${(reference.floorPerToken / minorPerUnit).toFixed(2)}. Users who bought that pack pay fewer naira than the list price suggests.`, fix: `Set "₦ per token" in YouTube films settings to ₦${(reference.floorPerToken / minorPerUnit).toFixed(2)} so the ₦ price is what you really earn.` });
+    findings.push({ level: 'warning', title: 'YouTube token rate is above what tokens sell for', detail: `YouTube converts ${money(youtube.nairaPerToken, economics.currency)} per token, but the cheapest pack sells a token for ${money(+(reference.floorPerToken / minorPerUnit).toFixed(2), economics.currency)}. Users who bought that pack pay less than the list price suggests.`, fix: `Set the price per token in YouTube films settings to ${money(+(reference.floorPerToken / minorPerUnit).toFixed(2), economics.currency)} so the listed price is what you really earn.` });
   }
   if (trial.enabled && trial.tokens < tokens.minimumStartBalance) {
     findings.push({ level: 'critical', title: 'The free trial can’t start anything', detail: `The trial gives ${trial.tokens} tokens but every paid task needs at least ${tokens.minimumStartBalance} available to start.`, fix: `Lower the minimum start balance to ${trial.tokens} or less, or raise the trial to at least ${tokens.minimumStartBalance}.` });

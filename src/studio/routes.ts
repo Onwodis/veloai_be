@@ -53,6 +53,7 @@ import { getStudioSettings, saveStudioSettings, studioSettingsSchema } from './s
 import { activeModels, getVideoModelSettings, JOB_LABEL, saveVideoModelSettings, useModel, VIDEO_JOBS, VIDEO_MODELS, videoModelAdvice, videoModelSettingsSchema } from './videoModels.js';
 import { AppError } from '../utils/AppError.js';
 import { sql } from './sql.js';
+import * as sceneReference from './sceneReference.js';
 
 const profileSchema = z.strictObject({ profile: z.string().trim().min(10).max(3000) });
 
@@ -162,6 +163,25 @@ studioRouter.post('/:projectId/takes/:takeId/resume', validate({ params: takePar
 });
 
 const sceneEditParams = z.strictObject({ workspaceId: z.uuid(), projectId: z.uuid(), sceneId: z.uuid() });
+/** A scene's reference video: attach (analysed by the director, charged once), edit the brief, remove. */
+const referenceSchema = z.strictObject({ assetId: z.uuid() });
+const referenceBriefSchema = z.strictObject({ brief: z.string().trim().min(5).max(900) });
+studioRouter.put('/:projectId/scenes/:sceneId/reference', validate({ params: sceneEditParams, body: referenceSchema }), async (req: Request, res: Response) => {
+  const { workspaceId, projectId, sceneId } = validParams(res, sceneEditParams);
+  await sceneReference.setReference(requireAuth(req), workspaceId, projectId, sceneId, validBody(req, referenceSchema).assetId);
+  res.json({ project: await studio.getProject(requireAuth(req), workspaceId, projectId) });
+});
+studioRouter.patch('/:projectId/scenes/:sceneId/reference', validate({ params: sceneEditParams, body: referenceBriefSchema }), async (req: Request, res: Response) => {
+  const { workspaceId, projectId, sceneId } = validParams(res, sceneEditParams);
+  await sceneReference.editReference(requireAuth(req), workspaceId, projectId, sceneId, validBody(req, referenceBriefSchema).brief);
+  res.json({ project: await studio.getProject(requireAuth(req), workspaceId, projectId) });
+});
+studioRouter.delete('/:projectId/scenes/:sceneId/reference', validate({ params: sceneEditParams }), async (req: Request, res: Response) => {
+  const { workspaceId, projectId, sceneId } = validParams(res, sceneEditParams);
+  await sceneReference.removeReference(requireAuth(req), workspaceId, projectId, sceneId);
+  res.json({ project: await studio.getProject(requireAuth(req), workspaceId, projectId) });
+});
+
 /** CapCut-style clip edits for one scene (rendered when the film is assembled). */
 studioRouter.put('/:projectId/scenes/:sceneId/edits', validate({ params: sceneEditParams, body: clipEditsSchema }), async (req: Request, res: Response) => {
   const { workspaceId, projectId, sceneId } = validParams(res, sceneEditParams);

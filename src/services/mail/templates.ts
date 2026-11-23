@@ -54,6 +54,40 @@ export function signupCodeMail(code: string): RenderedMail {
   };
 }
 
+export function emailCodeMail(code: string): RenderedMail {
+  const intro = `Use this code to confirm your email address on ${env.APP_NAME}. It expires in 10 minutes.`;
+  const outro = "If you didn't ask for this, ignore this email.";
+  return {
+    template: 'email_code',
+    subject: `${code} is your ${env.APP_NAME} confirmation code`,
+    html: layout({ heading: 'Confirm your email', intro, code, outro }),
+    text: `Your confirmation code: ${code}\n\n${intro}\n\n${outro}`,
+  };
+}
+
+/** To the user: the team replied to (or resolved) their ticket. */
+export function supportUpdateMail(params: { name: string; number: number; subject: string; heading: string; message: string; url: string }): RenderedMail {
+  const intro = `Hi ${params.name}, ${params.message}`;
+  return {
+    template: 'support_update',
+    subject: `[#${params.number}] ${params.subject}`,
+    html: layout({ heading: params.heading, intro, cta: { label: `Open ticket #${params.number}`, url: params.url }, outro: 'Reply on the ticket page; replying to this email does not reach us.' }),
+    text: `${intro}\n\nOpen the ticket: ${params.url}`,
+  };
+}
+
+/** To the super admins: a new ticket, or a user's reply on one. */
+export function supportStaffMail(params: { kind: 'new' | 'reply'; number: number; subject: string; category: string; from: string; email: string; body: string; url: string }): RenderedMail {
+  const heading = params.kind === 'new' ? `New ticket #${params.number}` : `Reply on ticket #${params.number}`;
+  const intro = `${params.from} (${params.email}) ${params.kind === 'new' ? `opened a ${params.category.toLowerCase()} ticket` : 'replied'}: “${params.subject}”. ${params.body.slice(0, 600)}${params.body.length > 600 ? '…' : ''}`;
+  return {
+    template: 'support_staff',
+    subject: `${env.APP_NAME} support: ${heading}: ${params.subject}`,
+    html: layout({ heading, intro, cta: { label: 'Open in the console', url: params.url } }),
+    text: `${intro}\n\n${params.url}`,
+  };
+}
+
 export function newUserMail(params: { name: string; email: string; role: string; total: number; url: string }): RenderedMail {
   const heading = `New sign-up: ${params.name}`;
   const intro = `A new account was created and its email confirmed: ${params.name} (${params.email}), signed up as ${params.role.toLowerCase()}. That makes ${params.total.toLocaleString('en')} accounts in total.`;

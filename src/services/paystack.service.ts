@@ -126,10 +126,12 @@ export async function startCheckout(auth: AuthContext, workspaceId: string, pack
 
   const user = await prisma.user.findUniqueOrThrow({ where: { id: auth.userId }, select: { email: true } });
   const mode = settings.paystackMode;
-  // Test mode credits real tokens for test-card "payments": in production only the super admin may
-  // use it (to try the flow); customers are told payments aren't open yet instead of getting free tokens.
+  // Test mode credits real tokens for test-card "payments". On the live site the super admin decides
+  // who may use it (testPurchases): everyone (pre-launch testing), listed testers, or only them.
   if (mode === 'TEST' && env.NODE_ENV === 'production' && auth.role !== 'SUPER_ADMIN') {
-    throw new AppError(503, 'INTERNAL_ERROR', 'Token purchases are being set up and open shortly. Please try again later.');
+    const allowed =
+      settings.testPurchases === 'EVERYONE' || (settings.testPurchases === 'TESTERS' && settings.testerEmails.includes(user.email.toLowerCase()));
+    if (!allowed) throw new AppError(503, 'INTERNAL_ERROR', 'Token purchases are being set up and open shortly. Please try again later.');
   }
   const reference = `${env.APP_SLUG.slice(0, 12)}_${mode === 'LIVE' ? 'L' : 'T'}_${randomToken(12)}`.replace(/[^A-Za-z0-9_-]/g, '');
 

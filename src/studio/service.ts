@@ -12,6 +12,7 @@
 import type { AuthContext } from '../middleware/authenticate.js';
 import { deleteObject, deletePrefix, headObject, keys, presignPut, readUrl } from '../services/storage.service.js';
 import { withMoves } from '../moves/prompt.js';
+import { referenceView, withReference } from './sceneReference.js';
 import { releaseSystem, reserveTokens, settleSystem } from '../services/token.service.js';
 import { requireMembership } from '../services/workspace.service.js';
 import { meContext, mentionsMe, replaceMe } from '../likeness/service.js';
@@ -211,6 +212,7 @@ async function fullView(project: ProjectRow, preloaded: { assets?: AssetRow[] } 
         intensity: scene.intensity ?? null,
         voiceAssetId: scene.voiceAssetId ?? null,
         moves: scene.moves ?? [],
+        reference: scene.reference ? await referenceView(scene.reference, assets.find((asset) => asset.id === scene.reference!.assetId)?.key) : null,
         approvedAt: iso(scene.approvedAt ?? null),
         shotApprovedAt: iso(scene.shotApprovedAt ?? null),
         startsAt: starts[index] ?? 0,
@@ -723,7 +725,7 @@ export async function generate(auth: AuthContext, workspaceId: string, projectId
         musicVideo: true,
         description: scene.description,
         // The characters' moves, woven in as human performance direction.
-        prompt: withMoves(scene.prompt ?? scene.description, scene.moves),
+        prompt: withReference(withMoves(scene.prompt ?? scene.description, scene.moves), scene.reference),
         shot: scene.shot,
         durationSec: scene.durationSec,
         featuresSubject: cast.referenceKeys.length > 0,
@@ -751,7 +753,7 @@ export async function generate(auth: AuthContext, workspaceId: string, projectId
       kind: project.kind,
       aspect: project.aspect,
       description: replaceMe(scene.description),
-      prompt: withMoves(replaceMe(scene.prompt ?? scene.description), scene.moves),
+      prompt: withReference(withMoves(replaceMe(scene.prompt ?? scene.description), scene.moves), scene.reference),
       shot: scene.shot,
       durationSec: scene.durationSec,
       featuresSubject,

@@ -11,6 +11,7 @@
 import { z } from 'zod';
 import type { AuthContext } from '../middleware/authenticate.js';
 import { readUrl } from '../services/storage.service.js';
+import { getTokenSettings } from '../services/settings.service.js';
 import { getWallet, isUnmetered, releaseSystem, reserveTokens, settleSystem } from '../services/token.service.js';
 import { requireMembership } from '../services/workspace.service.js';
 import { VISUAL_STYLE_IDS } from '../studio/cinema.js';
@@ -194,9 +195,11 @@ const showView = (show: ShowRow) => ({
 /* ------------------------------------------------------------------ pricing */
 
 export async function pricing() {
-  const settings = await getYoutubeSettings();
+  const [settings, tokens] = await Promise.all([getYoutubeSettings(), getTokenSettings()]);
   return {
     enabled: settings.enabled,
+    /** The platform currency (super admin setting): every price here is in it. */
+    currency: tokens.currency,
     nairaPer30s: settings.nairaPer30s,
     nairaPerToken: settings.nairaPerToken,
     minSeconds: settings.minSeconds,

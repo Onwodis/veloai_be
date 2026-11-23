@@ -141,6 +141,8 @@ export async function view(auth: AuthContext, workspaceId: string, projectId: st
       moves: scene.moves,
       // Clip edits (texts over the scene with the text engine; rendered at the master).
       edits: scene.edits,
+      // The creator's reference video (what to recreate, clean and professional).
+      reference: scene.reference ?? null,
       voice: voice?.url ? { url: voice.url, durationSec: Number((voice.meta as { durationSec?: number }).durationSec ?? 0) } : null,
     };
   });

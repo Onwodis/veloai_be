@@ -20,7 +20,7 @@
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { probe } from '../media/ffmpeg.js';
+import { ffmpeg, probe } from '../media/ffmpeg.js';
 import { deletePrefix, downloadToFile, keys, readUrl, uploadFile } from '../services/storage.service.js';
 import { releaseSystem, settleSystem, touchReservation } from '../services/token.service.js';
 import { logger } from '../utils/logger.js';
@@ -111,6 +111,26 @@ async function referenceRequest(
   };
 }
 
+/** Continuations allowed after the first clip (so a 10 s model covers scenes up to ~40 s). */
+const MAX_EXTENSIONS = 3;
+
+/**
+ * The clips a shot is made of. The first comes from the shot's model; when the scene is longer than
+ * that model's longest clip, the shot is extended: each continuation starts from the previous
+ * clip's last frame (image-to-video) until the scene is covered. Used for the price and the shoot.
+ */
+export function shotPlan(settings: StudioSettings, first: StudioModel, sceneSeconds: number): { param: string | null; seconds: number }[] {
+  const plan = [pickDuration(first, sceneSeconds)];
+  let covered = plan[0]!.seconds;
+  const extend = settings.models.imageToVideo;
+  while (extend.enabled && sceneSeconds - covered > 1 && plan.length <= MAX_EXTENSIONS) {
+    const next = pickDuration(extend, sceneSeconds - covered);
+    plan.push(next);
+    covered += next.seconds;
+  }
+  return plan;
+}
+
 /** Tokens a take costs, given the settings (also used for the up-front estimate). */
 export function takeCost(settings: StudioSettings, spec: CostSpec): number {
   const { models, costs } = settings;
@@ -119,7 +139,8 @@ export function takeCost(settings: StudioSettings, spec: CostSpec): number {
     return seconds * costs.videoEditPerSecond + (spec.lipSync && spec.music && models.lipSync.enabled ? seconds * costs.lipSyncPerSecond : 0);
   }
   const usesKeyframe = spec.featuresSubject && spec.identityKeys.length > 0 && models.keyframe.enabled;
-  const seconds = pickDuration(animationModel(settings, spec, Boolean(usesKeyframe || spec.sceneKey)), spec.durationSec).seconds;
+  // Every clip of the shot is priced, extensions included (the hold caps the charge, so it must cover them).
+  const seconds = shotPlan(settings, animationModel(settings, spec, Boolean(usesKeyframe || spec.sceneKey)), spec.durationSec).reduce((sum, clip) => sum + clip.seconds, 0);
   const lipSync = spec.lipSync && spec.music && models.lipSync.enabled ? Math.ceil(spec.durationSec) * costs.lipSyncPerSecond : 0;
   return (usesKeyframe ? costs.keyframe : 0) + Math.ceil(seconds) * costs.videoPerSecond + lipSync;
 }
@@ -134,7 +155,9 @@ export function paidStagesCost(settings: StudioSettings, spec: TakeRow['spec'], 
   }
   const usesKeyframe = Boolean(outputs['KEYFRAME']);
   let total = usesKeyframe ? costs.keyframe : 0;
-  if (outputs['ANIMATING']) total += Math.ceil(pickDuration(animationModel(settings, spec, Boolean(usesKeyframe || spec.sceneKey)), spec.durationSec).seconds) * costs.videoPerSecond;
+  const plan = shotPlan(settings, animationModel(settings, spec, Boolean(usesKeyframe || spec.sceneKey)), spec.durationSec);
+  if (outputs['ANIMATING']) total += Math.ceil(plan[0]!.seconds) * costs.videoPerSecond;
+  for (let index = 1; index < plan.length; index += 1) if (outputs[`EXTEND_${index}`]) total += Math.ceil(plan[index]!.seconds) * costs.videoPerSecond;
   if (outputs['LIPSYNC']) total += Math.ceil(spec.durationSec) * costs.lipSyncPerSecond;
   return Math.min(total, takeCost(settings, spec));
 }
@@ -309,6 +332,8 @@ export async function runTake(takeId: string): Promise<void> {
     };
     /** The video model was given the vocal itself (Seedance 2.x @Audio1). */
     let nativeVocal = false;
+    /** The shot was extended past the model's longest clip (continuations from the last frame). */
+    let extended = false;
 
     /* ANIMATING (or EDIT for post-processing) --------------------------- */
     await enter('ANIMATING');
@@ -365,13 +390,57 @@ export async function runTake(takeId: string): Promise<void> {
         });
       }
       videoUrl = fal.outputUrl(await run('ANIMATING', model.endpoint, input), 'video');
+
+      /* EXTENDING: the scene is longer than the model's longest clip ------ */
+      const plan = shotPlan(settings, model, spec.durationSec);
+      if (plan.length > 1) {
+        const segments = [join(workDir, 'segment-0.mp4')];
+        await downloadUrl(videoUrl, segments[0]!);
+        let covered = (await probe(segments[0]!)).durationSec || duration.seconds;
+        const extendModel = models.imageToVideo;
+        const continuation =
+          ' This shot continues from the given frame with no cut: the same people in the same clothes, the same place and light, the camera keeps moving the same way; the action carries on naturally.';
+        for (let index = 1; index < plan.length && spec.durationSec - covered > 1; index += 1) {
+          const lastFrame = join(workDir, `last-${index}.png`);
+          await ffmpeg(['-y', '-sseof', '-0.08', '-i', segments[index - 1]!, '-frames:v', '1', '-q:v', '2', lastFrame]);
+          const frameKey = `${keys.studio(take.workspaceId, take.projectId)}/takes/${takeId}/extend-${index}.png`;
+          await uploadFile(frameKey, lastFrame, 'image/png');
+          const clip = plan[index]!;
+          const result = await run(
+            `EXTEND_${index}`,
+            extendModel.endpoint,
+            animationRequest(extendModel, {
+              prompt: `${motionPrompt(promptInput)}${continuation}`,
+              negative: negativePrompt(promptInput.lipSync ?? false, { energy: spec.energy, visual: spec.visual, subject: promptInput.featuresSubject, scene: promptInput.scene }),
+              duration: clip.param,
+              imageUrl: await readUrl(frameKey),
+              aspect: size.model,
+            }),
+          );
+          const segment = join(workDir, `segment-${index}.mp4`);
+          await downloadUrl(fal.outputUrl(result, 'video'), segment);
+          segments.push(segment);
+          covered += (await probe(segment)).durationSec || clip.seconds;
+        }
+        // Joined into one continuous clip (re-encoded to one format; the first frame of each continuation repeats the last frame before it, so it is skipped).
+        const joined = join(workDir, 'extended.mp4');
+        const inputs = segments.flatMap((file) => ['-i', file]);
+        const parts = segments.map((_, index) => `[${index}:v]${index ? 'trim=start_frame=1,' : ''}scale=${size.width}:${size.height}:force_original_aspect_ratio=increase,crop=${size.width}:${size.height},fps=30,setsar=1,setpts=PTS-STARTPTS[v${index}]`);
+        await ffmpeg(['-y', ...inputs, '-filter_complex', `${parts.join(';')};${segments.map((_, index) => `[v${index}]`).join('')}concat=n=${segments.length}:v=1:a=0[out]`, '-map', '[out]', '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', joined]);
+        const joinedKey = `${keys.studio(take.workspaceId, take.projectId)}/takes/${takeId}/extended.mp4`;
+        await uploadFile(joinedKey, joined, 'video/mp4');
+        videoUrl = await readUrl(joinedKey);
+        duration = { param: null, seconds: covered };
+        extended = true;
+        engines.push(`extended to ${covered.toFixed(1)} s in ${segments.length} continuous parts`);
+      }
     }
 
     /* LIPSYNC ----------------------------------------------------------- */
     let lipSynced = false;
     /** Set when the take's final file is already on disk (lip-synced + muxed). */
     let finalFile: string | null = null;
-    const trustNative = nativeVocal && (await getVideoModelSettings()).nativeLipSync === 'native';
+    const trustNative = nativeVocal && !extended && (await getVideoModelSettings()).nativeLipSync === 'native';
     if (spec.lipSync && spec.music && trustNative) {
       // The video model already sang to the vocal (Seedance @Audio1) and the admin trusts it:
       // no lip-sync pass, just the mastered mix under the picture.

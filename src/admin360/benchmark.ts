@@ -7,7 +7,7 @@
  * bottlenecks and their severity are computed on every request.
  */
 import { env } from '../config/env.js';
-import { pricingAudit } from '../billing/pricingAudit.js';
+import { money, pricingAudit } from '../billing/pricingAudit.js';
 import { getTokenSettings } from '../services/settings.service.js';
 import { studioQueueCounts } from '../studio/queue.js';
 import { getStudioSettings } from '../studio/settings.js';
@@ -158,7 +158,7 @@ export async function benchmark() {
   // Money
   const losing = audit.steps.filter((step) => step.zone === 'loss').length;
   if (losing) add({ id: 'below-cost', area: 'Money', severity: 'critical', title: `${losing} of ${audit.steps.length} AI steps are sold below cost`, evidence: 'Every use of them loses money; growth makes it worse.', fix: 'Apply the recommended prices on Pricing & profit (fair 55% margin).', effort: 'S' });
-  if (audit.youtube.zone === 'loss') add({ id: 'youtube-price', area: 'Money', severity: 'high', title: 'YouTube films lose money', evidence: `₦${audit.youtube.per30.toLocaleString('en')} per 30 s brings ~₦${audit.youtube.revenuePer30.toLocaleString('en')} against ~₦${audit.youtube.costPer30.toLocaleString('en')} cost.`, fix: `Raise to ~₦${audit.youtube.recommendedPer30.toLocaleString('en')} per 30 s or use a cheaper video model for films.`, effort: 'S' });
+  if (audit.youtube.zone === 'loss') add({ id: 'youtube-price', area: 'Money', severity: 'high', title: 'YouTube films lose money', evidence: `${money(audit.youtube.per30, audit.currency)} per 30 s brings ~${money(audit.youtube.revenuePer30, audit.currency)} against ~${money(audit.youtube.costPer30, audit.currency)} cost.`, fix: `Raise to ~${money(audit.youtube.recommendedPer30, audit.currency)} per 30 s or use a cheaper video model for films.`, effort: 'S' });
   if (tokens.paystackMode === 'TEST') add({ id: 'test-payments', area: 'Money', severity: 'critical', title: 'Payments are in TEST mode', evidence: 'No real money is collected.', fix: 'Add the live Paystack key and switch to LIVE.', effort: 'S' });
 
   // Setup

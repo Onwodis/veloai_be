@@ -13,6 +13,7 @@ import { env } from '../config/env.js';
 import type { AuthContext } from '../middleware/authenticate.js';
 import { prisma } from '../config/database.js';
 import { sendMail } from '../services/mail/mail.service.js';
+import { supportStaffMail, supportUpdateMail } from '../services/mail/templates.js';
 import { grant } from '../services/token.service.js';
 import { AppError } from '../utils/AppError.js';
 import { logger } from '../utils/logger.js';
@@ -84,25 +85,34 @@ async function personalWorkspace(userId: string): Promise<string | null> {
   return member?.workspaceId ?? null;
 }
 
-/** Best-effort email to the ticket owner. */
-async function notify(ticket: TicketRow, subject: string, text: string): Promise<void> {
+/** Best-effort email to the ticket owner (the team replied / resolved it). */
+async function notify(ticket: TicketRow, heading: string, message: string): Promise<void> {
   try {
     const user = await prisma.user.findUnique({ where: { id: ticket.userId }, select: { email: true, displayName: true } });
     if (!user) return;
-    const link = `${env.WEB_APP_URL}/dashboard/support/${ticket.id}`;
-    const body = `${text}\n\nOpen the ticket: ${link}`;
-    await sendMail(user.email, {
-      template: 'support',
-      subject: `[#${ticket.number}] ${subject}`,
-      text: `Hi ${user.displayName},\n\n${body}\n\n${env.APP_NAME} support`,
-      html: `<p>Hi ${escapeHtml(user.displayName)},</p><p>${escapeHtml(text).replace(/\n/g, '<br/>')}</p><p><a href="${link}">Open ticket #${ticket.number}</a></p><p>${escapeHtml(env.APP_NAME)} support</p>`,
-    });
+    await sendMail(
+      user.email,
+      supportUpdateMail({ name: user.displayName, number: ticket.number, subject: ticket.subject, heading, message, url: `${env.WEB_APP_URL}/dashboard/support/${ticket.id}` }),
+    );
   } catch (error) {
     logger.warn({ err: error, ticketId: ticket.id }, 'support email not sent');
   }
 }
 
-const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
+/** Best-effort email to every super admin: a new ticket, or a user's reply. */
+async function notifyStaff(ticket: TicketRow, kind: 'new' | 'reply', body: string): Promise<void> {
+  try {
+    const [user, admins] = await Promise.all([
+      prisma.user.findUnique({ where: { id: ticket.userId }, select: { email: true, displayName: true } }),
+      prisma.user.findMany({ where: { role: 'SUPER_ADMIN' }, select: { email: true } }),
+    ]);
+    if (!user) return;
+    const mail = supportStaffMail({ kind, number: ticket.number, subject: ticket.subject, category: ticket.category, from: user.displayName, email: user.email, body, url: `${env.WEB_APP_URL}/dashboard/admin/support/${ticket.id}` });
+    await Promise.all(admins.map((admin) => sendMail(admin.email, mail).catch((error: unknown) => logger.warn({ err: error }, 'support staff email not sent'))));
+  } catch (error) {
+    logger.warn({ err: error, ticketId: ticket.id }, 'support staff email not sent');
+  }
+}
 
 /* ------------------------------------------------------------------ user */
 
@@ -122,6 +132,7 @@ export async function create(auth: AuthContext, input: { subject: string; catego
     INSERT INTO support_tickets (user_id, workspace_id, subject, category, priority)
     VALUES (${auth.userId}, ${workspaceId}, ${input.subject}, ${input.category}, ${priority}) RETURNING *`;
   await sql`INSERT INTO support_messages (ticket_id, author_id, is_staff, body) VALUES (${ticket!.id}, ${auth.userId}, false, ${input.body})`;
+  void notifyStaff(ticket!, 'new', input.body);
   return get(auth, ticket!.id);
 }
 
@@ -155,7 +166,8 @@ export async function reply(auth: AuthContext, ticketId: string, body: string, i
     // A user reply re-opens a resolved ticket; a staff reply waits for the user.
     const status = staff ? (ticket.status === 'OPEN' ? 'PENDING' : ticket.status) : ticket.status === 'RESOLVED' || ticket.status === 'PENDING' ? 'OPEN' : ticket.status;
     await sql`UPDATE support_tickets SET status = ${status}, last_reply_by = ${staff ? 'STAFF' : 'USER'}, updated_at = now() WHERE id = ${ticketId}`;
-    if (staff) void notify(ticket, `New reply: ${ticket.subject}`, `Our team replied to your ticket:\n\n${body}`);
+    if (staff) void notify(ticket, 'New reply from support', `our team replied to your ticket: “${body.slice(0, 1500)}”`);
+    else void notifyStaff(ticket, 'reply', body);
   }
   return get(auth, ticketId);
 }
@@ -214,6 +226,6 @@ export async function resolve(auth: AuthContext, ticketId: string, input: { reso
       credited = credited + ${credit}, last_reply_by = 'STAFF', updated_at = now()
     WHERE id = ${ticketId}`;
   await sql`INSERT INTO support_messages (ticket_id, author_id, is_staff, body) VALUES (${ticketId}, ${auth.userId}, true, ${`Resolved: ${input.resolution}${credit ? `\n\n${credit.toLocaleString('en')} tokens were credited to your workspace.` : ''}`})`;
-  void notify(ticket, `Resolved: ${ticket.subject}`, `Your ticket was resolved:\n\n${input.resolution}${credit ? `\n\nWe credited ${credit.toLocaleString('en')} tokens to your workspace.` : ''}\n\nReply if anything is still wrong and it re-opens.`);
+  void notify(ticket, 'Your ticket is resolved', `your ticket was resolved: “${input.resolution}”.${credit ? ` We credited ${credit.toLocaleString('en')} tokens to your workspace.` : ''} Reply on the ticket if anything is still wrong and it re-opens.`);
   return get(auth, ticketId);
 }

@@ -67,6 +67,13 @@ export const tokenSettingsSchema = z.strictObject({
    * Stops a runaway job or a loop from draining a balance in one go.
    */
   dailyEngineCap: z.number().int().min(0).max(10_000_000).default(20_000),
+  /**
+   * While Paystack is in TEST mode on the live site, who may "buy" with Paystack's test cards (tokens
+   * are credited for free): EVERYONE (pre-launch testing), TESTERS (the super admin + testerEmails),
+   * or SUPER_ADMIN only. Ignored in LIVE mode.
+   */
+  testPurchases: z.enum(['EVERYONE', 'TESTERS', 'SUPER_ADMIN']).default('EVERYONE'),
+  testerEmails: z.array(z.string().trim().toLowerCase().email()).max(100).default([]),
 });
 
 /** Task types that spend on the film engine (counted against dailyEngineCap). */
@@ -93,6 +100,8 @@ export const DEFAULT_TOKEN_SETTINGS: TokenSettings = {
   signupBonus: 250,
   superAdminMode: 'UNLIMITED',
   dailyEngineCap: 20_000,
+  testPurchases: 'EVERYONE',
+  testerEmails: [],
 };
 
 /* ------------------------------------------------------------------ estimating */

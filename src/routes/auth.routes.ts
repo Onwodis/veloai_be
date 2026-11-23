@@ -28,6 +28,7 @@
  *   GET    /mfa/recovery-codes          remaining recovery codes               (bearer)
  *   POST   /mfa/recovery-codes          regenerate (needs a TOTP code)         (bearer)
  */
+import { z } from 'zod';
 import { Router } from 'express';
 import * as auth from '../controllers/auth.controller.js';
 import { authenticate, optionalAuthenticate, requireAuth } from '../middleware/authenticate.js';
@@ -48,6 +49,8 @@ import {
   resetPasswordSchema,
   sessionParamsSchema,
 } from '../models/auth.schemas.js';
+
+const emailCodeSchema = z.strictObject({ code: z.string().trim().regex(/^\d{6}$/, { error: 'Enter the 6-digit code from the email' }) });
 
 export const authRouter: Router = Router();
 
@@ -80,6 +83,13 @@ authRouter.post('/email/verify', recoveryLimiter, validate({ body: emailTokenSch
 });
 authRouter.get('/email/status', authenticate, async (req, res) => {
   res.json(await emailVerification.verificationStatus(requireAuth(req).userId));
+});
+/* Signed-in accounts that never confirmed their address: a 6-digit code instead of a link. */
+authRouter.post('/email/code', signupCodeLimiter, authenticate, async (req, res) => {
+  res.json(await emailVerification.sendAccountCode(requireAuth(req).userId));
+});
+authRouter.post('/email/code/verify', mfaLimiter, authenticate, validate({ body: emailCodeSchema }), async (req, res) => {
+  res.json(await emailVerification.verifyAccountCode(requireAuth(req).userId, validBody(req, emailCodeSchema).code));
 });
 authRouter.post('/email/resend', recoveryLimiter, authenticate, async (req, res) => {
   const userId = requireAuth(req).userId;

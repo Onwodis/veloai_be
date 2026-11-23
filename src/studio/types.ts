@@ -181,6 +181,8 @@ export interface SceneRow {
   transitionMode: 'MANUAL' | 'AI';
   /** Music videos: burn the lyric subtitles over this scene (when subtitles are on). */
   subtitles?: boolean;
+  /** The creator's reference video for this scene (migration 051): see sceneReference.ts. */
+  reference?: import('./sceneReference.js').SceneReference | null;
   /** CapCut-style clip edits (migration 016): see clipEdits.ts. */
   edits?: unknown;
   /** Music videos (migration 017): how the scene relates to the song. */

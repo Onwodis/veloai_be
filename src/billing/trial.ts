@@ -24,7 +24,8 @@ export const trialSettingsSchema = z.strictObject({
   days: z.number().int().min(1).max(365),
 });
 export type TrialSettings = z.infer<typeof trialSettingsSchema>;
-export const DEFAULT_TRIAL: TrialSettings = { enabled: true, tokens: 20, days: 7 };
+/** Off until the super admin turns it on (Tokens & payments → offers). */
+export const DEFAULT_TRIAL: TrialSettings = { enabled: false, tokens: 20, days: 7 };
 
 export async function getTrialSettings(): Promise<TrialSettings> {
   const [row] = await sql<{ value: unknown }[]>`SELECT value FROM platform_settings WHERE key = 'trial'`.catch(() => []);

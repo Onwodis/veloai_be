@@ -16,9 +16,9 @@ const endpoint = z
 
 export const youtubeSettingsSchema = z.strictObject({
   enabled: z.boolean(),
-  /** ₦ for 30 seconds of finished film. */
+  /** Price of 30 seconds of finished film, in the platform currency (token settings; field name kept from the NGN launch). */
   nairaPer30s: z.number().int().min(100).max(10_000_000),
-  /** What one token is worth in ₦ (to charge the price from the token wallet). */
+  /** What one token is worth in the platform currency (to charge the price from the token wallet). */
   nairaPerToken: z.number().min(0.01).max(100_000),
   minSeconds: z.number().int().min(10).max(600),
   maxSeconds: z.number().int().min(15).max(1800),

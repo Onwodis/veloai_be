@@ -17,7 +17,7 @@ import { AppError } from '../utils/AppError.js';
 import { randomToken, sha256 } from '../utils/crypto.js';
 import { logger } from '../utils/logger.js';
 import { sendMail } from './mail/mail.service.js';
-import { signupCodeMail, verifyEmailMail } from './mail/templates.js';
+import { emailCodeMail, signupCodeMail, verifyEmailMail } from './mail/templates.js';
 import { getTokenSettings } from './settings.service.js';
 import { applyEntry } from './token.service.js';
 
@@ -138,6 +138,33 @@ export async function markVerifiedAtSignup(userId: string): Promise<void> {
     INSERT INTO email_verifications (user_id, verified_at, sent_at) VALUES (${userId}, now(), now())
     ON CONFLICT (user_id) DO UPDATE SET verified_at = coalesce(email_verifications.verified_at, now()), token_hash = NULL`;
   await grantWelcome(userId).catch((error: unknown) => logger.error({ err: error, userId }, 'welcome tokens not granted at sign-up'));
+}
+
+/* ------------------------------------------------------------------ account code (accounts made before sign-up codes) */
+
+/** Emails a 6-digit code to a signed-in user's own address (accounts that never confirmed it). */
+export async function sendAccountCode(userId: string): Promise<{ sentTo: string; expiresInSeconds: number }> {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { email: true } });
+  const [row] = await sql<Row[]>`SELECT * FROM email_verifications WHERE user_id = ${userId}`;
+  if (row?.verifiedAt) throw AppError.conflict('Your email is already confirmed.');
+  const [last] = await sql<{ sentAt: Date }[]>`SELECT sent_at FROM signup_codes WHERE email = ${user.email}`;
+  if (last && Date.now() - last.sentAt.getTime() < RESEND_GAP_MS) throw new AppError(429, 'RATE_LIMITED', 'A code was just sent: check your inbox (and spam), or ask again in a minute.');
+  const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+  await sql`
+    INSERT INTO signup_codes (email, code_hash, expires_at, attempts, sent_at) VALUES (${user.email}, ${codeHash(user.email, code)}, ${new Date(Date.now() + CODE_TTL_MS)}, 0, now())
+    ON CONFLICT (email) DO UPDATE SET code_hash = EXCLUDED.code_hash, expires_at = EXCLUDED.expires_at, attempts = 0, sent_at = now()`;
+  await sendMail(user.email, emailCodeMail(code));
+  return { sentTo: user.email, expiresInSeconds: CODE_TTL_MS / 1000 };
+}
+
+/** The code from that email: confirms the address and grants the welcome tokens (once). */
+export async function verifyAccountCode(userId: string, code: string): Promise<{ verified: true; bonus: number }> {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { email: true } });
+  await consumeSignupCode(user.email, code);
+  await sql`
+    INSERT INTO email_verifications (user_id, verified_at, sent_at) VALUES (${userId}, now(), now())
+    ON CONFLICT (user_id) DO UPDATE SET verified_at = coalesce(email_verifications.verified_at, now()), token_hash = NULL`;
+  return { verified: true, bonus: await grantWelcome(userId) };
 }
 
 /** Free tokens wait for a verified address. */

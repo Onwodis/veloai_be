@@ -32,6 +32,7 @@ import { FILM_KINDS, MOODS, NARRATORS } from './catalog.js';
 import * as channels from './channels.js';
 import * as service from './service.js';
 import { getYoutubeSettings, saveYoutubeSettings, youtubeSettingsSchema } from './settings.js';
+import { getTokenSettings } from '../services/settings.service.js';
 
 const uuid = z.uuid();
 const workspaceParams = z.strictObject({ workspaceId: uuid });
@@ -125,5 +126,5 @@ youtubeOauthRouter.get('/callback', async (req: Request, res: Response) => {
 
 export const adminYoutubeRouter: Router = Router();
 adminYoutubeRouter.use(authenticate, authorize('SUPER_ADMIN'));
-adminYoutubeRouter.get('/', send(async () => ({ settings: await getYoutubeSettings(), redirectUri: channels.redirectUri(), configured: channels.youtubeConfigured() })));
+adminYoutubeRouter.get('/', send(async () => ({ settings: await getYoutubeSettings(), currency: (await getTokenSettings()).currency, redirectUri: channels.redirectUri(), configured: channels.youtubeConfigured() })));
 adminYoutubeRouter.put('/', validate({ body: youtubeSettingsSchema }), send(async (req) => ({ settings: await saveYoutubeSettings(validBody(req, youtubeSettingsSchema), requireAuth(req).userId) })));
