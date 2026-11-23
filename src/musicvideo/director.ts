@@ -584,8 +584,11 @@ export async function storyboard(
   rawContext: DirectorContext,
   discussion: string,
   sceneCount?: number,
+  /** Progress for the page: what the director is doing and how far along (0-1). */
+  onProgress?: (step: string, fraction: number) => Promise<void> | void,
 ): Promise<{ logline: string; scenes: (PlannedMvScene & { kind: 'INTRO' | 'STORY' | 'OUTRO' })[]; engine: string }> {
   const context = withDistinctScenes(rawContext);
+  await onProgress?.(`${env.BOT_NAME} is listening to the song and planning the story…`, 0.05);
   const count = Math.max(3, Math.min(60, sceneCount ?? (context.songSeconds ? Math.ceil(context.songSeconds / 7) : 10)));
 
   // 1. Outline, retried once if it came back short or repetitive.
@@ -603,10 +606,13 @@ export async function storyboard(
   let outline = await outlineBeats(context, discussion, count);
   const issue = problems(outline);
   if (issue) {
+    await onProgress?.(`${env.BOT_NAME} is reworking the plan so no two scenes repeat…`, 0.2);
     const second = await outlineBeats(context, discussion, count, issue);
     if (!problems(second) || second.beats.length > outline.beats.length) outline = second;
   }
   outline.beats.sort((a, b) => a.startSec - b.startSec);
+  await onProgress?.(`Story planned: ${outline.beats.length} scenes. ${env.BOT_NAME} is writing them…`, 0.3);
+  let done = 0;
 
   // 2. Full scenes, a few beats per call, in parallel (one retry per batch).
   const SIZE = 6;
@@ -616,6 +622,8 @@ export async function storyboard(
     ranges.map(async ([from, to]) => {
       let written = await writeBatch(context, outline, from, to).catch(() => [] as BatchScene[]);
       if (written.length < to - from) written = await writeBatch(context, outline, from, to).catch(() => written);
+      done += to - from;
+      await onProgress?.(`Wrote scenes ${from + 1}–${to} (${done} of ${outline.beats.length})…`, 0.3 + 0.6 * (done / outline.beats.length));
       // One scene per beat, in order; anything still missing falls back to the beat itself.
       return outline.beats.slice(from, to).map((item, offset) => {
         const scene = written[offset];

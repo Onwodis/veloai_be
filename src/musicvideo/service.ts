@@ -76,6 +76,7 @@ interface MvRow {
   loudnessLufs: number;
   lyrics: Lyrics | null;
   lyricsJob: LyricsJob | null;
+  storyJob: StoryJob | null;
   polish: PolishReport | null;
   sequence: Sequence | null;
   audioAnalysis: Record<string, AudioAnalysis>;
@@ -143,6 +144,8 @@ export async function touch(projectId: string): Promise<void> {
 
 /** Runs a token-gated AI step: reserve → work → settle (or release on failure). */
 export async function charged<T>(auth: AuthContext, workspaceId: string, projectId: string, kind: string, tokens: number, note: string, work: () => Promise<T>): Promise<T> {
+  // Free work (e.g. repairing a board an old bug broke): nothing to hold or charge.
+  if (tokens <= 0) return work();
   const { reservation } = await reserveTokens(auth, workspaceId, kind, tokens, { projectId });
   try {
     const result = await work();
@@ -193,7 +196,7 @@ async function characterView(character: CharacterRow, assets: Map<string, AssetR
  */
 const MV_VIEW_COLUMNS = [
   'project_id', 'workspace_id', 'genre', 'vision', 'mood', 'lead_act', 'stage', 'approvals', 'original_song_id', 'audio_edits', 'mix_rendered_at',
-  'loudness_lufs', 'lyrics', 'auto_mode', 'auto_by', 'created_at', 'updated_at', 'artist_name', 'lyrics_job', 'polish', 'sequence', 'creative_mode', 'camera_energy', 'visual_style',
+  'loudness_lufs', 'lyrics', 'auto_mode', 'auto_by', 'created_at', 'updated_at', 'artist_name', 'lyrics_job', 'story_job', 'polish', 'sequence', 'creative_mode', 'camera_energy', 'visual_style',
   'subtitles', 'foley', 'auto_approve', 'titles', 'direction',
 ];
 
@@ -240,6 +243,9 @@ export async function view(auth: AuthContext, workspaceId: string, projectId: st
         mv.lyricsJob?.status === 'RUNNING' && Date.now() - new Date(mv.lyricsJob.startedAt).getTime() > LYRICS_STALE_MS
           ? { ...mv.lyricsJob, status: 'FAILED' as const, error: 'Transcription was interrupted (the server restarted). Run it again.' }
           : mv.lyricsJob,
+      storyJob: storyJobView(mv.storyJob),
+      // Scenes that are copies of an earlier one (left by an old bug): the page offers a free rewrite.
+      copiedScenes: copiedSceneCount(base.scenes),
       autoMode: mv.autoMode,
       options: { creativeMode: mv.creativeMode, cameraEnergy: mv.cameraEnergy ?? 'bold', visualStyle: mv.visualStyle ?? 'human', subtitles: mv.subtitles, foley: mv.foley, autoApprove: mv.autoApprove },
       polish: mv.polish,
@@ -378,6 +384,136 @@ export interface LyricsJob {
   startedAt: string;
 }
 
+/**
+ * Writing the scenes, in the background: WAITING_LYRICS while the song is transcribed first
+ * (it then starts on its own), RUNNING with the step and progress, DONE / FAILED at the end.
+ * Who asked is kept so the job can be charged to them when it starts after the transcription.
+ */
+export interface StoryJob {
+  status: 'WAITING_LYRICS' | 'RUNNING' | 'DONE' | 'FAILED';
+  step: string;
+  progress: number;
+  error: string | null;
+  scenes: number | null;
+  sceneCount: number | null;
+  startedAt: string;
+  finishedAt: string | null;
+  by: { userId: string; role: string } | null;
+  /** Rewriting a board of copies (old bug): not charged. */
+  free?: boolean;
+}
+
+/** How many scenes repeat an earlier scene's script (same opening words). */
+export function copiedSceneCount(scenes: { description: string }[]): number {
+  const seen = new Set<string>();
+  let copies = 0;
+  for (const scene of scenes) {
+    const key = scene.description.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim().slice(0, 100);
+    if (!key) continue;
+    if (seen.has(key)) copies += 1;
+    seen.add(key);
+  }
+  return copies;
+}
+
+/** A job not updated for this long was lost to a restart. */
+const STORY_STALE_MS = 20 * 60_000;
+
+function storyJobView(job: StoryJob | null) {
+  if (!job) return null;
+  const { by: _by, ...rest } = job;
+  const stale = (job.status === 'RUNNING' || job.status === 'WAITING_LYRICS') && Date.now() - new Date(job.startedAt).getTime() > (job.status === 'RUNNING' ? STORY_STALE_MS : LYRICS_STALE_MS);
+  return stale ? { ...rest, status: 'FAILED' as const, error: 'Writing the scenes was interrupted (the server restarted). Press Write the scenes again.' } : rest;
+}
+
+async function saveStoryJob(workspaceId: string, projectId: string, job: StoryJob): Promise<void> {
+  await sql`UPDATE mv_projects SET story_job = ${json(job)}, updated_at = now() WHERE project_id = ${projectId}`;
+  publishProgress({ kind: 'studio', workspaceId, projectId, stage: 'STORY', status: job.status, progress: Math.round(job.progress * 100), detail: job.step });
+}
+
+/** Runs the scene writing in the background, saving each step (shown as progress, then a notice). */
+function runStoryJob(auth: AuthContext, workspaceId: string, projectId: string, sceneCount: number | undefined, base: StoryJob): void {
+  let job: StoryJob = { ...base, status: 'RUNNING', step: `${env.BOT_NAME} is planning the story on the song…`, progress: 0.03, error: null, startedAt: new Date().toISOString() };
+  const save = async (patch: Partial<StoryJob>): Promise<void> => {
+    job = { ...job, ...patch };
+    await saveStoryJob(workspaceId, projectId, job).catch(() => undefined);
+  };
+  void (async () => {
+    await save({});
+    try {
+      const result = await buildStoryboard(auth, workspaceId, projectId, sceneCount, (step, fraction) => save({ step, progress: Math.max(job.progress, Math.min(0.97, fraction)) }), job.free === true);
+      const scenes = result.scenes.length;
+      await save({ status: 'DONE', step: `${env.BOT_NAME} wrote ${scenes} scenes, each on its own part of the song.`, progress: 1, scenes, finishedAt: new Date().toISOString() });
+    } catch (error) {
+      const message = (error instanceof Error ? error.message : String(error)).slice(0, 400);
+      logger.error({ err: error, projectId }, 'writing the scenes failed');
+      await save({ status: 'FAILED', step: 'Writing the scenes stopped.', error: message, finishedAt: new Date().toISOString() });
+    }
+  })();
+}
+
+/**
+ * "Write the scenes": answers straight away and writes in the background (progress on the page,
+ * a notice when done). A song that was never transcribed is transcribed first and the scenes follow
+ * automatically. The balance is checked now, so the low-balance warning still shows on the click.
+ */
+export async function startStoryboard(auth: AuthContext, workspaceId: string, projectId: string, sceneCount?: number) {
+  await access(auth, workspaceId, true);
+  const { mv } = await load(workspaceId, projectId);
+  assertStage(mv, 'SCENES', 'STORYBOARD');
+  const current = storyJobView(mv.storyJob);
+  if (current && (current.status === 'RUNNING' || current.status === 'WAITING_LYRICS')) throw AppError.conflict(`${env.BOT_NAME} is already writing the scenes: follow the progress on this page.`);
+  // A board left full of copies by the old scene-fitting bug is rewritten free of charge.
+  const free = copiedSceneCount(await sql<{ description: string }[]>`SELECT description FROM studio_scenes WHERE project_id = ${projectId} ORDER BY position`) >= 2;
+  // Balance check up front (the refusal opens the low-balance warning on this click).
+  if (!free) {
+    const { costs } = await getStudioSettings();
+    const probe = await reserveTokens(auth, workspaceId, 'MV_STORYBOARD', costs.mvStoryboard, { projectId, probe: true });
+    await releaseSystem(probe.reservation.id, workspaceId).catch(() => undefined);
+  }
+
+  const base: StoryJob = {
+    status: 'WAITING_LYRICS',
+    step: `${env.BOT_NAME} is listening to the song first (transcribing the lyrics)…`,
+    progress: 0,
+    error: null,
+    scenes: null,
+    sceneCount: sceneCount ?? null,
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    by: { userId: auth.userId, role: auth.role },
+    free,
+  };
+  if (!mv.lyrics) {
+    const transcribing = mv.lyricsJob?.status === 'RUNNING' && Date.now() - new Date(mv.lyricsJob.startedAt).getTime() < LYRICS_STALE_MS;
+    await saveStoryJob(workspaceId, projectId, base);
+    if (!transcribing) {
+      try {
+        await transcribeLyrics(auth, workspaceId, projectId);
+      } catch (error) {
+        await sql`UPDATE mv_projects SET story_job = NULL WHERE project_id = ${projectId}`;
+        throw error;
+      }
+    }
+    return view(auth, workspaceId, projectId);
+  }
+  runStoryJob(auth, workspaceId, projectId, sceneCount, base);
+  return view(auth, workspaceId, projectId);
+}
+
+/** After a transcription: scenes that were waiting for the words are written now (or told it failed). */
+async function continueStoryAfterLyrics(workspaceId: string, projectId: string, ok: boolean, error?: string): Promise<void> {
+  const [row] = await sql<{ storyJob: StoryJob | null }[]>`SELECT story_job FROM mv_projects WHERE project_id = ${projectId}`;
+  const job = row?.storyJob;
+  if (!job || job.status !== 'WAITING_LYRICS' || !job.by) return;
+  if (!ok) {
+    await saveStoryJob(workspaceId, projectId, { ...job, status: 'FAILED', step: 'Listening to the song failed.', error: `The lyrics could not be transcribed: ${error ?? 'unknown error'}. Try again.`, finishedAt: new Date().toISOString() });
+    return;
+  }
+  const auth = { userId: job.by.userId, role: job.by.role, sessionId: 'story-job' } as AuthContext;
+  runStoryJob(auth, workspaceId, projectId, job.sceneCount ?? undefined, job);
+}
+
 /** A RUNNING job older than this was lost to a restart. */
 const LYRICS_STALE_MS = 45 * 60_000;
 
@@ -418,6 +554,8 @@ export async function transcribeLyrics(auth: AuthContext, workspaceId: string, p
       if (!reservation.unmetered) await sql`UPDATE studio_projects SET tokens_charged = tokens_charged + ${tokens} WHERE id = ${projectId}`;
       await sql`UPDATE mv_projects SET lyrics = ${json(stored)} WHERE project_id = ${projectId}`;
       await save(job({ status: 'DONE', progress: 1, lines: stored.lines }, state));
+      // Scenes waiting for the words are written now.
+      void continueStoryAfterLyrics(workspaceId, projectId, true).catch((error: unknown) => logger.error({ err: error, projectId }, 'could not continue the scene writing'));
       // The voice as a background cue (accent + region, from the words). Best effort, free.
       void refreshVoice(projectId, stored, { title: project.title, artist: mv.artistName, genre: mv.genre });
     } catch (error) {
@@ -425,6 +563,7 @@ export async function transcribeLyrics(auth: AuthContext, workspaceId: string, p
       const message = (error instanceof Error ? error.message : String(error)).slice(0, 400);
       logger.error({ err: error, projectId }, 'lyric transcription failed');
       await save(job({ status: 'FAILED', error: message }, state)).catch(() => undefined);
+      void continueStoryAfterLyrics(workspaceId, projectId, false, message).catch(() => undefined);
     }
   })();
   return view(auth, workspaceId, projectId);
@@ -1351,18 +1490,18 @@ export async function applyProposal(auth: AuthContext, workspaceId: string, proj
  * edit. Used to draft the scenes (SCENES stage) and to lock the final
  * storyboard (STORYBOARD stage, also folding in the director's room).
  */
-export async function buildStoryboard(auth: AuthContext, workspaceId: string, projectId: string, sceneCount?: number) {
+export async function buildStoryboard(
+  auth: AuthContext,
+  workspaceId: string,
+  projectId: string,
+  sceneCount?: number,
+  onProgress?: (step: string, fraction: number) => Promise<void> | void,
+  /** Not charged (rewriting a board the old bug filled with copies). */
+  free = false,
+) {
   await access(auth, workspaceId, true);
   const { project, mv } = await load(workspaceId, projectId);
   assertStage(mv, 'SCENES', 'STORYBOARD');
-  // The director writes to the words: a song that was never transcribed is transcribed first.
-  if (!mv.lyrics) {
-    const transcribing = mv.lyricsJob?.status === 'RUNNING' && Date.now() - new Date(mv.lyricsJob.startedAt).getTime() < LYRICS_STALE_MS;
-    if (!transcribing) await transcribeLyrics(auth, workspaceId, projectId);
-    throw AppError.conflict(
-      `${env.BOT_NAME} is listening to the song first: the lyrics are being transcribed (about a minute). Write the scenes again when that's done, so every scene follows the words sung under it.`,
-    );
-  }
   const [context, messages, settings] = await Promise.all([
     directorContext(project, mv),
     sql<MessageRow[]>`SELECT * FROM mv_messages WHERE project_id = ${projectId} ORDER BY created_at`,
@@ -1372,9 +1511,10 @@ export async function buildStoryboard(auth: AuthContext, workspaceId: string, pr
   // Enough scenes to cover the whole song (about one every 6 s, 3-10 s each).
   const songSeconds = context.songSeconds ?? 0;
   const wanted = sceneCount ?? (songSeconds ? Math.min(settings.limits.maxScenes, Math.max(4, Math.ceil(songSeconds / 6))) : undefined);
-  const board = await charged(auth, workspaceId, projectId, 'MV_STORYBOARD', settings.costs.mvStoryboard, `Music video · ${project.title.slice(0, 50)}: storyboard`, () =>
-    storyboard(context, discussion, wanted),
+  const board = await charged(auth, workspaceId, projectId, 'MV_STORYBOARD', free ? 0 : settings.costs.mvStoryboard, `Music video · ${project.title.slice(0, 50)}: storyboard`, () =>
+    storyboard(context, discussion, wanted, onProgress),
   );
+  await onProgress?.(`Placing ${board.scenes.length} scenes on the song and saving them…`, 0.95);
   if (songSeconds > 0) fitToSong(board.scenes, songSeconds, settings.limits.maxScenes);
   if (board.scenes.length < 2) throw new AppError(502, 'INTERNAL_ERROR', 'The director returned an incomplete storyboard. Try again.');
   // Lock to the song: cuts on bar lines, real words under each scene, lip sync only where someone sings.
@@ -1433,7 +1573,9 @@ function fitToSong(
 ): void {
   if (scenes.length === 0) return;
   const IDEAL = 8;
-  const SHOT_MAX = 10;
+  // Only a scene too long for one extended shot (> 30 s) is split; anything shorter stays one scene
+  // (filmed as an extended shot), so the board never shows look-alike "parts".
+  const SHOT_MAX = 30;
   const half = (value: number): number => Math.round(value * 2) / 2;
   // 1. Scale to the song (keeps the director's proportions).
   const total = scenes.reduce((sum, scene) => sum + scene.durationSec, 0);

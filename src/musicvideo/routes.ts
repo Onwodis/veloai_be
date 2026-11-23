@@ -454,7 +454,8 @@ musicVideoRouter.post('/:projectId/scenes/lock-to-song', validate({ params: proj
 }));
 musicVideoRouter.post('/:projectId/storyboard', validate({ params: projectParams, body: storyboardSchema }), send(async (req, res) => {
   const { workspaceId, projectId } = p(res, projectParams);
-  return { project: await director.buildStoryboard(requireAuth(req), workspaceId, projectId, validBody(req, storyboardSchema).sceneCount) };
+  // Answers at once; the scenes are written in the background (progress + a notice when done).
+  return { project: await director.startStoryboard(requireAuth(req), workspaceId, projectId, validBody(req, storyboardSchema).sceneCount) };
 }));
 
 musicVideoRouter.post('/:projectId/stages/:stage/approve', validate({ params: stageParams }), send(async (req, res) => {
