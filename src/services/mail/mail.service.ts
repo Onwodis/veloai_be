@@ -16,6 +16,7 @@ import { env } from '../../config/env.js';
 import { AppError } from '../../utils/AppError.js';
 import { decryptSecret, encryptSecret } from '../../utils/encryption.js';
 import { logger } from '../../utils/logger.js';
+import { personalize } from './brand.js';
 import type { RenderedMail } from './templates.js';
 import { testMail } from './templates.js';
 
@@ -314,7 +315,9 @@ async function activeTransport(): Promise<{ transport: Transporter; row: SmtpCre
   return cachedTransport;
 }
 
-export async function sendMail(to: string, mail: RenderedMail, credentialId?: string): Promise<void> {
+export async function sendMail(to: string, raw: RenderedMail, credentialId?: string): Promise<void> {
+  // Every email: the app logo, "Hi {name}," and the footer (sent to / check spam), see brand.ts.
+  const mail = await personalize(to, raw);
   let transport: Transporter;
   let row: SmtpCredential;
   if (credentialId) {

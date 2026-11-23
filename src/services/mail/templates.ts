@@ -3,6 +3,7 @@
  * in every mainstream client, plus a plain-text part.
  */
 import { env } from '../../config/env.js';
+import { MARK } from './brand.js';
 
 export interface RenderedMail {
   subject: string;
@@ -23,13 +24,16 @@ function layout(params: { heading: string; intro: string; cta?: { label: string;
   return `<!doctype html><html><body style="margin:0;background:#0b1020;padding:32px 12px">
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center">
 <table role="presentation" width="560" cellspacing="0" cellpadding="0" style="max-width:560px;background:#111827;border:1px solid #1f2937;border-radius:20px;padding:32px;font-family:Helvetica,Arial,sans-serif;color:#e5e7eb">
-<tr><td style="font-size:13px;letter-spacing:4px;color:#22d3ee;padding-bottom:24px">${name.toUpperCase()}</td></tr>
+<tr><td style="font-size:13px;letter-spacing:4px;color:#22d3ee;padding-bottom:24px">${MARK.logo}<span style="display:none">${name.toUpperCase()}</span></td></tr>
 <tr><td style="font-size:24px;font-weight:700;color:#ffffff;padding-bottom:12px">${escapeHtml(params.heading)}</td></tr>
+${MARK.greeting}
 <tr><td style="font-size:15px;line-height:24px;color:#d1d5db;padding-bottom:24px">${escapeHtml(params.intro)}</td></tr>
 ${params.code ? `<tr><td style="padding:4px 0 24px"><span style="display:inline-block;padding:14px 22px;border-radius:12px;background:#0b1020;border:1px solid #374151;font-family:Menlo,Consolas,monospace;font-size:30px;font-weight:700;letter-spacing:10px;color:#ffffff">${escapeHtml(params.code)}</span></td></tr>` : ''}
 ${button}
 ${params.outro ? `<tr><td style="font-size:13px;line-height:20px;color:#9ca3af">${escapeHtml(params.outro)}</td></tr>` : ''}
-</table></td></tr></table></body></html>`;
+</table></td></tr>
+${MARK.footer}
+</table></body></html>`;
 }
 
 export function passwordResetMail(url: string): RenderedMail {
