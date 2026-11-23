@@ -991,6 +991,25 @@ export async function addScene(auth: AuthContext, workspaceId: string, projectId
   return view(auth, workspaceId, projectId);
 }
 
+/** Playback speed in the edit for the director's speed choice (lip-synced shots always play at 1×). */
+const SPEED_OF: Record<string, number> = { normal: 1, 'slow-motion': 0.6, 'dramatic-slow': 0.5, fast: 1.25 };
+
+/**
+ * The director's speed effect: the scene plays at that speed in the edit (clip edits), unless the
+ * artist already set a speed themselves. Slow motion also asks the video model for smooth,
+ * continuous motion, so the slowed footage looks shot for it.
+ */
+async function applySpeedEffect(sceneId: string, speed: string | undefined, lipSync: boolean): Promise<void> {
+  const factor = lipSync ? 1 : (SPEED_OF[speed ?? 'normal'] ?? 1);
+  await sql`
+    UPDATE studio_scenes SET edits = jsonb_set(coalesce(edits, '{}'::jsonb), '{speed}', ${json(factor)})
+    WHERE id = ${sceneId} AND coalesce((edits ->> 'speed')::float, 1) IN (1, 0.6, 0.5, 1.25)`;
+}
+
+/** The prompt sentence that makes footage hold up when slowed. */
+const slowMotionNote = (speed: string | undefined, lipSync: boolean): string =>
+  !lipSync && (speed === 'slow-motion' || speed === 'dramatic-slow') ? ' Shot to be played in slow motion: smooth, continuous, unhurried motion, hair and fabric flowing, no sudden cuts within the shot.' : '';
+
 async function writeScene(projectId: string, sceneId: string, input: MvSceneInput, approved: boolean): Promise<void> {
   const [scene] = await sql<SceneRow[]>`SELECT * FROM studio_scenes WHERE id = ${sceneId} AND project_id = ${projectId}`;
   if (!scene) throw AppError.notFound('Scene');
@@ -1120,7 +1139,7 @@ export async function expand(auth: AuthContext, workspaceId: string, projectId: 
       ...(scene.title?.trim() ? {} : { title: plan.title.slice(0, 80) }),
       ...(scene.subtitle?.trim() ? {} : { subtitle: plan.subtitle.slice(0, 120) }),
       description: plan.description.slice(0, 1000),
-      prompt: plan.prompt.slice(0, 2000),
+      prompt: `${plan.prompt}${slowMotionNote(plan.speed, plan.lipSync)}`.slice(0, 2000),
       shot: plan.shot,
       transition: plan.transition,
       durationSec: plan.durationSec,
@@ -1136,6 +1155,7 @@ export async function expand(auth: AuthContext, workspaceId: string, projectId: 
     },
     false,
   );
+  await applySpeedEffect(sceneId, plan.speed, plan.lipSync);
   await autoApprove(projectId);
   // The director says what it did and why (shown on the scene card).
   return { project: await view(auth, workspaceId, projectId), why: plan.why.slice(0, 1200) };
@@ -1358,13 +1378,16 @@ export async function buildStoryboard(auth: AuthContext, workspaceId: string, pr
     await tx`UPDATE studio_takes SET status = 'CANCELED', finished_at = now() WHERE project_id = ${projectId} AND status IN ('QUEUED', 'KEYFRAME', 'ANIMATING', 'LIPSYNC', 'STORING')`;
     await tx`DELETE FROM studio_scenes WHERE project_id = ${projectId}`;
     for (const [position, scene] of board.scenes.slice(0, settings.limits.maxScenes).entries()) {
+      const lipSynced = scene.lipSync && scene.characterIds.length > 0;
+      // The director's speed effect plays in the edit (lip-synced shots stay at 1×).
+      const speed = lipSynced ? 1 : (SPEED_OF[scene.speed ?? 'normal'] ?? 1);
       await tx`
-        INSERT INTO studio_scenes (project_id, position, kind, title, subtitle, description, prompt, shot, transition, duration_sec, features_subject, lip_sync, character_ids, costume, location, time_of_day, lyric, mode, emotion, intensity)
-        VALUES (${projectId}, ${position}, ${scene.kind}, ${scene.title.slice(0, 80)}, ${scene.subtitle.slice(0, 120)}, ${scene.description.slice(0, 1000)}, ${scene.prompt.slice(0, 2000)}, ${scene.shot}, ${scene.transition}, ${scene.durationSec},
+        INSERT INTO studio_scenes (project_id, position, kind, title, subtitle, description, prompt, shot, transition, duration_sec, features_subject, lip_sync, character_ids, costume, location, time_of_day, lyric, mode, emotion, intensity, edits)
+        VALUES (${projectId}, ${position}, ${scene.kind}, ${scene.title.slice(0, 80)}, ${scene.subtitle.slice(0, 120)}, ${scene.description.slice(0, 1000)}, ${`${scene.prompt}${slowMotionNote(scene.speed, lipSynced)}`.slice(0, 2000)}, ${scene.shot}, ${scene.transition}, ${scene.durationSec},
           ${scene.characterIds.length > 0}, ${scene.lipSync && scene.characterIds.length > 0}, ${scene.characterIds}::uuid[], ${scene.costume.slice(0, 500)},
           ${scene.location.slice(0, 200)}, ${scene.timeOfDay.slice(0, 24)}, ${scene.lyric.slice(0, 300)},
           ${scene.lipSync && scene.characterIds.length > 0 ? 'PERFORMANCE' : scene.mode === 'PERFORMANCE' ? 'NARRATIVE' : (scene.mode ?? null)},
-          ${scene.lipSync ? (scene.emotion ?? null) : null}, ${intensityLevel(scene.intensity)})`;
+          ${scene.lipSync ? (scene.emotion ?? null) : null}, ${intensityLevel(scene.intensity)}, ${speed === 1 ? null : json({ speed })})`;
     }
   });
   await studio.dropTakeFiles(workspaceId, projectId, oldTakes);
@@ -1374,14 +1397,16 @@ export async function buildStoryboard(auth: AuthContext, workspaceId: string, pr
 }
 
 /**
- * Makes the scene lengths add up to the song: scales them to the song length
- * (each 3-10 s, half-second steps), then, if the 10 s cap leaves the song
- * uncovered, adds story scenes before the outro until it is covered.
+ * Makes the storyboard cover the song, in step with it. Scene lengths are scaled to the song, then
+ * every scene longer than one shot is split into consecutive parts of about 8 s: each part is the
+ * same moment moving forward (same place, wardrobe and cast), and the song lock that follows gives
+ * each part the words sung under it. Nothing is ever copied or marked "rework": if scenes still fall
+ * short of the song (the scene cap), the longest story scenes are lengthened (filmed as extended shots).
  */
 function fitToSong(
   scenes: {
+    kind: 'INTRO' | 'STORY' | 'OUTRO';
     durationSec: number;
-    kind: string;
     description: string;
     prompt: string;
     shot: string;
@@ -1397,31 +1422,55 @@ function fitToSong(
   maxScenes: number,
 ): void {
   if (scenes.length === 0) return;
-  const clamp = (value: number): number => Math.min(10, Math.max(3, Math.round(value * 2) / 2));
+  const IDEAL = 8;
+  const SHOT_MAX = 10;
+  const half = (value: number): number => Math.round(value * 2) / 2;
+  // 1. Scale to the song (keeps the director's proportions).
   const total = scenes.reduce((sum, scene) => sum + scene.durationSec, 0);
   const factor = songSeconds / Math.max(1, total);
-  for (const scene of scenes) scene.durationSec = clamp(scene.durationSec * factor);
+  for (const scene of scenes) scene.durationSec = Math.max(3, half(scene.durationSec * factor));
+
+  // 2. Split long scenes into parts that move the moment forward (as many as the scene cap allows).
+  for (let index = 0; index < scenes.length; index += 1) {
+    const scene = scenes[index]!;
+    if (scene.durationSec <= SHOT_MAX) continue;
+    const room = maxScenes - scenes.length;
+    if (room <= 0) break;
+    const parts = Math.min(Math.ceil(scene.durationSec / IDEAL), room + 1);
+    if (parts < 2) continue;
+    const each = half(scene.durationSec / parts);
+    const pieces = Array.from({ length: parts }, (_, part) => ({
+      ...scene,
+      kind: part === 0 ? scene.kind : scene.kind === 'OUTRO' ? 'OUTRO' : 'STORY',
+      durationSec: part === parts - 1 ? half(scene.durationSec - each * (parts - 1)) : each,
+      characterIds: [...scene.characterIds],
+      description: part === 0 ? scene.description : `${scene.description} The moment moves on (part ${part + 1} of ${parts}): what happens follows the words heard here.`,
+      prompt:
+        part === 0
+          ? scene.prompt
+          : `${scene.prompt} Part ${part + 1} of ${parts} of this moment, continuing straight on from the previous part: the same place, wardrobe and people, the action progressing with the words sung now; a new angle or move, never a repeat of the previous part.`,
+    }));
+    // Only the first piece keeps a bookend kind; the rest are story beats (the last of an outro stays the outro).
+    if (scene.kind === 'OUTRO') pieces.forEach((piece, at) => (piece.kind = at === parts - 1 ? 'OUTRO' : 'STORY'));
+    if (scene.kind === 'INTRO') pieces.forEach((piece, at) => (piece.kind = at === 0 ? 'INTRO' : 'STORY'));
+    scenes.splice(index, 1, ...pieces);
+    index += parts - 1;
+  }
+
+  // 3. Any gap left (scene cap reached): lengthen the longest story scenes (extended shots), never copy.
   let covered = scenes.reduce((sum, scene) => sum + scene.durationSec, 0);
-  // Top up the longest-possible way first, then add scenes (copies of the story beats, marked to be re-planned).
-  for (const scene of scenes) {
-    if (covered >= songSeconds - 0.5) break;
-    const extra = Math.min(10 - scene.durationSec, songSeconds - covered);
-    scene.durationSec = clamp(scene.durationSec + extra);
-    covered = scenes.reduce((sum, item) => sum + item.durationSec, 0);
+  const story = () => scenes.filter((scene) => scene.kind === 'STORY').sort((a, b) => a.durationSec - b.durationSec);
+  for (let guard = 0; covered < songSeconds - 0.5 && guard < 200; guard += 1) {
+    const target = story()[0] ?? scenes[scenes.length - 1]!;
+    const add = Math.min(2, songSeconds - covered);
+    target.durationSec = half(target.durationSec + add);
+    covered += add;
   }
-  let source = 1;
-  while (covered < songSeconds - 0.5 && scenes.length < maxScenes) {
-    const base = scenes[Math.min(source, scenes.length - 2)] ?? scenes[0]!;
-    const duration = clamp(Math.min(10, songSeconds - covered));
-    scenes.splice(scenes.length - 1, 0, { ...base, kind: 'STORY', durationSec: duration, description: `${base.description} (continuation: rework this beat)`, characterIds: [...base.characterIds] });
-    covered += duration;
-    source += 2;
-  }
-  // Trim any overshoot from the longest story scene.
+  // 4. Trim any overshoot from the longest story scene.
   const over = covered - songSeconds;
   if (over > 0.5) {
-    const longest = scenes.filter((scene) => scene.kind === 'STORY').sort((a, b) => b.durationSec - a.durationSec)[0];
-    if (longest) longest.durationSec = clamp(longest.durationSec - over);
+    const longest = [...scenes].filter((scene) => scene.kind === 'STORY').sort((a, b) => b.durationSec - a.durationSec)[0];
+    if (longest) longest.durationSec = Math.max(3, half(longest.durationSec - over));
   }
 }
 

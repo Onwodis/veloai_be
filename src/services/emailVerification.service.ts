@@ -16,10 +16,8 @@ import { sql } from '../studio/sql.js';
 import { AppError } from '../utils/AppError.js';
 import { randomToken, sha256 } from '../utils/crypto.js';
 import { logger } from '../utils/logger.js';
-import { sendMail } from './mail/mail.service.js';
+import { sendMailInBackground } from './mail/mail.service.js';
 import { emailCodeMail, signupCodeMail, verifyEmailMail } from './mail/templates.js';
-import { getTokenSettings } from './settings.service.js';
-import { applyEntry } from './token.service.js';
 
 const LINK_TTL_MS = 48 * 3_600_000;
 const RESEND_GAP_MS = 60_000;
@@ -44,8 +42,7 @@ export async function sendVerification(userId: string, force = false): Promise<v
   await sql`
     INSERT INTO email_verifications (user_id, token_hash, expires_at, sent_at) VALUES (${userId}, ${sha256(raw)}, ${expiresAt}, now())
     ON CONFLICT (user_id) DO UPDATE SET token_hash = EXCLUDED.token_hash, expires_at = EXCLUDED.expires_at, sent_at = now()`;
-  const { signupBonus } = await getTokenSettings();
-  await sendMail(user.email, verifyEmailMail(`${env.WEB_APP_URL}/verify-email?token=${encodeURIComponent(raw)}`, signupBonus));
+  sendMailInBackground(user.email, verifyEmailMail(`${env.WEB_APP_URL}/verify-email?token=${encodeURIComponent(raw)}`, 0));
 }
 
 /** After sign-up: send the link; a mail outage never blocks the sign-up itself. */
@@ -53,26 +50,9 @@ export async function startVerification(userId: string): Promise<void> {
   await sendVerification(userId, true).catch((error: unknown) => logger.warn({ err: error, userId }, 'verification email not sent at sign-up'));
 }
 
-/** Grants the welcome tokens once, into the user's own (first) workspace. */
-async function grantWelcome(userId: string): Promise<number> {
-  const { signupBonus } = await getTokenSettings();
-  const [claimed] = await sql<{ userId: string }[]>`
-    UPDATE email_verifications SET bonus_granted_at = now() WHERE user_id = ${userId} AND bonus_granted_at IS NULL RETURNING user_id`;
-  if (!claimed || signupBonus <= 0) return 0;
-  const [owned] = await sql<{ workspaceId: string }[]>`
-    SELECT workspace_id FROM workspace_members WHERE user_id = ${userId} AND role = 'OWNER' ORDER BY created_at LIMIT 1`.catch(() => []);
-  if (!owned) return 0;
-  try {
-    await prisma.$transaction((tx) =>
-      applyEntry(tx, { workspaceId: owned.workspaceId, type: 'GRANT', amount: signupBonus, reference: `welcome:${userId}`, note: 'Welcome tokens (email verified)', actorId: userId }),
-    );
-  } catch (error) {
-    // Undo the lock so the next verification attempt can grant it.
-    await sql`UPDATE email_verifications SET bonus_granted_at = NULL WHERE user_id = ${userId}`.catch(() => undefined);
-    throw error;
-  }
-  logger.info({ userId, workspaceId: owned.workspaceId, tokens: signupBonus }, 'welcome tokens granted on email verification');
-  return signupBonus;
+/** No free tokens on this platform: confirming an address never grants any (owner decision, 2026-11-23). */
+async function grantWelcome(_userId: string): Promise<number> {
+  return 0;
 }
 
 /** The link from the email: verifies the address and grants the welcome tokens. */
@@ -87,8 +67,8 @@ export async function verifyEmail(raw: string): Promise<{ verified: true; bonus:
 }
 
 export async function verificationStatus(userId: string): Promise<{ verified: boolean; sentAt: string | null; bonus: number; bonusGranted: boolean }> {
-  const [[row], { signupBonus }] = await Promise.all([sql<Row[]>`SELECT * FROM email_verifications WHERE user_id = ${userId}`, getTokenSettings()]);
-  return { verified: Boolean(row?.verifiedAt), sentAt: row?.sentAt?.toISOString() ?? null, bonus: signupBonus, bonusGranted: Boolean(row?.bonusGrantedAt) };
+  const [row] = await sql<Row[]>`SELECT * FROM email_verifications WHERE user_id = ${userId}`;
+  return { verified: Boolean(row?.verifiedAt), sentAt: row?.sentAt?.toISOString() ?? null, bonus: 0, bonusGranted: Boolean(row?.bonusGrantedAt) };
 }
 
 /* ------------------------------------------------------------------ sign-up code */
@@ -110,7 +90,7 @@ export async function sendSignupCode(email: string): Promise<{ sentTo: string; e
   await sql`
     INSERT INTO signup_codes (email, code_hash, expires_at, attempts, sent_at) VALUES (${email}, ${codeHash(email, code)}, ${new Date(Date.now() + CODE_TTL_MS)}, 0, now())
     ON CONFLICT (email) DO UPDATE SET code_hash = EXCLUDED.code_hash, expires_at = EXCLUDED.expires_at, attempts = 0, sent_at = now()`;
-  await sendMail(email, signupCodeMail(code));
+  sendMailInBackground(email, signupCodeMail(code));
   return { sentTo: email, expiresInSeconds: CODE_TTL_MS / 1000 };
 }
 
@@ -137,7 +117,6 @@ export async function markVerifiedAtSignup(userId: string): Promise<void> {
   await sql`
     INSERT INTO email_verifications (user_id, verified_at, sent_at) VALUES (${userId}, now(), now())
     ON CONFLICT (user_id) DO UPDATE SET verified_at = coalesce(email_verifications.verified_at, now()), token_hash = NULL`;
-  await grantWelcome(userId).catch((error: unknown) => logger.error({ err: error, userId }, 'welcome tokens not granted at sign-up'));
 }
 
 /* ------------------------------------------------------------------ account code (accounts made before sign-up codes) */
@@ -153,7 +132,7 @@ export async function sendAccountCode(userId: string): Promise<{ sentTo: string;
   await sql`
     INSERT INTO signup_codes (email, code_hash, expires_at, attempts, sent_at) VALUES (${user.email}, ${codeHash(user.email, code)}, ${new Date(Date.now() + CODE_TTL_MS)}, 0, now())
     ON CONFLICT (email) DO UPDATE SET code_hash = EXCLUDED.code_hash, expires_at = EXCLUDED.expires_at, attempts = 0, sent_at = now()`;
-  await sendMail(user.email, emailCodeMail(code));
+  sendMailInBackground(user.email, emailCodeMail(code));
   return { sentTo: user.email, expiresInSeconds: CODE_TTL_MS / 1000 };
 }
 

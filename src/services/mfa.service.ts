@@ -24,12 +24,11 @@ import { redis } from '../config/redis.js';
 import { AppError } from '../utils/AppError.js';
 import { randomToken, sha256 } from '../utils/crypto.js';
 import { decryptSecret, encryptSecret } from '../utils/encryption.js';
-import { logger } from '../utils/logger.js';
 import { hashPassword } from '../utils/password.js';
 import { verifyChallengeToken, type ChallengeClaims } from '../utils/tokens.js';
 import { generateTotpSecret, otpauthUrl, verifyTotp } from '../utils/totp.js';
 import { issueSession, type AuthResult } from './auth.service.js';
-import { sendMail } from './mail/mail.service.js';
+import { sendMailInBackground } from './mail/mail.service.js';
 import { mfaResetMail, passwordResetMail } from './mail/templates.js';
 import { recordSecurityEvent, type RequestMeta } from './securityEvent.service.js';
 import { clearSignInFailures, failedMfa, secondsUntil } from './authBackoff.js';
@@ -269,11 +268,8 @@ export async function requestPasswordReset(email: string, meta: RequestMeta): Pr
   if (!user) return;
   const token = await issueEmailToken(user.id, 'PASSWORD_RESET');
   await recordSecurityEvent('PASSWORD_RESET_REQUESTED', meta, user.id);
-  try {
-    await sendMail(email, passwordResetMail(`${env.WEB_APP_URL}/reset-password?token=${encodeURIComponent(token)}`));
-  } catch (error) {
-    logger.error({ err: error, userId: user.id }, 'password reset email could not be sent');
-  }
+  // Sent behind the response (retried), so a slow mail server never stalls the request.
+  sendMailInBackground(email, passwordResetMail(`${env.WEB_APP_URL}/reset-password?token=${encodeURIComponent(token)}`));
 }
 
 export async function resetPassword(token: string, password: string, meta: RequestMeta): Promise<void> {
@@ -292,7 +288,7 @@ export async function requestMfaReset(challengeToken: string, meta: RequestMeta)
   const user = await prisma.user.findUnique({ where: { id: claims.sub }, select: { email: true } });
   if (!user) throw AppError.notFound('User');
   const token = await issueEmailToken(claims.sub, 'MFA_RESET');
-  await sendMail(user.email, mfaResetMail(`${env.WEB_APP_URL}/reset-2fa?token=${encodeURIComponent(token)}`));
+  sendMailInBackground(user.email, mfaResetMail(`${env.WEB_APP_URL}/reset-2fa?token=${encodeURIComponent(token)}`));
   await recordSecurityEvent('MFA_RESET_REQUESTED', meta, claims.sub);
   const [name = '', domain = ''] = user.email.split('@');
   return { sentTo: `${name.slice(0, 2)}${'•'.repeat(Math.max(1, name.length - 2))}@${domain}` };

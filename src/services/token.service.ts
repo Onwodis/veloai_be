@@ -143,7 +143,8 @@ export async function preflight(auth: AuthContext, workspaceId: string, input: E
   const [settings, wallet] = await Promise.all([getTokenSettings(), getWallet(workspaceId)]);
   const estimate = estimateTask(settings, input, billed);
   const unmetered = settings.superAdminMode !== 'METERED' && auth.role === 'SUPER_ADMIN';
-  const shortfall = unmetered ? 0 : Math.max(0, estimate.requiredToStart - wallet.available);
+  // Can start whenever the balance covers the task's price (buffer + minimum start balance are guidance).
+  const shortfall = unmetered ? 0 : Math.max(0, estimate.subtotal - wallet.available);
   return { estimate, wallet, minimumStartBalance: settings.minimumStartBalance, canStart: shortfall === 0, shortfall, unmetered };
 }
 
@@ -181,6 +182,24 @@ const reservationView = (row: {
 });
 
 /**
+ * Holds tokens for a task, inside the caller's transaction. The task goes ahead whenever the
+ * workspace can pay its actual price (`price`): the safety buffer and the minimum start balance are
+ * guidance, not a wall, so a user can always spend the balance they have. The hold is the buffered
+ * estimate, trimmed to what is available (never below the price). Returns the amount held, or null
+ * when the balance can't cover the price.
+ */
+async function holdTokens(tx: Tx, workspaceId: string, price: number, estimate: number): Promise<number | null> {
+  await ensureWallet(tx, workspaceId);
+  const [wallet] = await tx.$queryRaw<Array<{ balance: number; held: number }>>`
+    SELECT balance, held FROM token_wallets WHERE workspace_id = ${workspaceId}::uuid FOR UPDATE`;
+  const available = (wallet?.balance ?? 0) - (wallet?.held ?? 0);
+  if (available < price) return null;
+  const hold = Math.max(price, Math.min(estimate, available));
+  await tx.$executeRaw`UPDATE token_wallets SET held = held + ${hold}, updated_at = now() WHERE workspace_id = ${workspaceId}::uuid`;
+  return hold;
+}
+
+/**
  * The gate. Call before creating any asset; throws 402 when the workspace
  * can't cover the task, so no AI tokens are spent on work that can't finish.
  */
@@ -205,20 +224,18 @@ export async function reserve(
   }
 
   const row = await prisma.$transaction(async (tx) => {
-    const held = await tx.$queryRaw<Array<{ held: number }>>`
-      UPDATE token_wallets SET held = held + ${check.estimate.reserve}, updated_at = now()
-      WHERE workspace_id = ${workspaceId}::uuid AND balance - held >= ${check.estimate.requiredToStart}
-      RETURNING held`;
-    if (held.length === 0) {
+    const held = await holdTokens(tx, workspaceId, check.estimate.subtotal, check.estimate.reserve);
+    if (held === null) {
+      const shortfall = Math.max(0, check.estimate.subtotal - check.wallet.available);
       throw new AppError(
         402,
         'INSUFFICIENT_TOKENS',
-        `This task needs ${check.estimate.requiredToStart.toLocaleString('en')} available tokens to start; the workspace has ${check.wallet.available.toLocaleString('en')}. Buy tokens to continue.`,
-        { required: check.estimate.requiredToStart, available: check.wallet.available, shortfall: check.shortfall },
+        `This task costs ${check.estimate.subtotal.toLocaleString('en')} tokens; the workspace has ${check.wallet.available.toLocaleString('en')} available (${shortfall.toLocaleString('en')} short). Buy tokens to continue.`,
+        { required: check.estimate.subtotal, available: check.wallet.available, shortfall },
       );
     }
     return tx.tokenReservation.create({
-      data: { workspaceId, taskType, estimated: check.estimate.reserve, createdById: auth.userId, expiresAt, input: input as Prisma.InputJsonValue },
+      data: { workspaceId, taskType, estimated: held, createdById: auth.userId, expiresAt, input: input as Prisma.InputJsonValue },
     });
   });
   logger.info({ workspaceId, reservationId: row.id, tokens: row.estimated }, 'tokens reserved');
@@ -239,8 +256,10 @@ export async function reserveTokens(
 ): Promise<{ reservation: ReservationView; required: number; available: number }> {
   if (auth.role !== 'SUPER_ADMIN') await requireMembership(auth.userId, workspaceId, ['OWNER', 'EDITOR']);
   const [settings, wallet] = await Promise.all([getTokenSettings(), getWallet(workspaceId)]);
-  const estimate = Math.max(1, Math.ceil(amount + (amount * settings.reserveBufferPercent) / 100));
-  const required = Math.max(estimate, settings.minimumStartBalance);
+  const price = Math.max(1, Math.ceil(amount));
+  const estimate = Math.max(price, Math.ceil(amount + (amount * settings.reserveBufferPercent) / 100));
+  // What must be available to go ahead: the price itself (the buffer and the minimum start balance are guidance).
+  const required = price;
   const expiresAt = new Date(Date.now() + settings.reservationTtlMinutes * 60_000);
   const data = { workspaceId, taskType, estimated: estimate, createdById: auth.userId, expiresAt, input: input as Prisma.InputJsonValue };
 
@@ -250,19 +269,17 @@ export async function reserveTokens(
   }
   await assertDailyEngineCap(workspaceId, taskType, estimate, settings.dailyEngineCap);
   const row = await prisma.$transaction(async (tx) => {
-    const held = await tx.$queryRaw<Array<{ held: number }>>`
-      UPDATE token_wallets SET held = held + ${estimate}, updated_at = now()
-      WHERE workspace_id = ${workspaceId}::uuid AND balance - held >= ${required}
-      RETURNING held`;
-    if (held.length === 0) {
+    const held = await holdTokens(tx, workspaceId, price, estimate);
+    if (held === null) {
+      const shortfall = Math.max(0, price - wallet.available);
       throw new AppError(
         402,
         'INSUFFICIENT_TOKENS',
-        `This needs ${required.toLocaleString('en')} available tokens to start; the workspace has ${wallet.available.toLocaleString('en')}. Buy tokens to continue.`,
-        { required, available: wallet.available, shortfall: Math.max(0, required - wallet.available) },
+        `This costs ${price.toLocaleString('en')} tokens; the workspace has ${wallet.available.toLocaleString('en')} available (${shortfall.toLocaleString('en')} short). Buy tokens to continue.`,
+        { required: price, available: wallet.available, shortfall },
       );
     }
-    return tx.tokenReservation.create({ data });
+    return tx.tokenReservation.create({ data: { ...data, estimated: held } });
   });
   logger.info({ workspaceId, reservationId: row.id, tokens: row.estimated, taskType }, 'tokens reserved');
   return { reservation: reservationView(row), required, available: wallet.available };

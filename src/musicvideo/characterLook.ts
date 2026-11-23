@@ -31,9 +31,41 @@ import { json, sql } from '../studio/sql.js';
 import { AppError } from '../utils/AppError.js';
 import { ENGINE_NAME } from '../utils/engineName.js';
 import { logger } from '../utils/logger.js';
+import { z } from 'zod';
+import { parse } from '../studio/director.js';
 import type { CharacterRow } from './cast.js';
 import { access, assertStage, castOne, load, loadCharacter, view } from './service.js';
 import { parseDirection, placeText } from './songmap.js';
+
+/**
+ * People may describe a character with famous names ("a young Denzel", "like Rihanna in 2016"). The
+ * image model must never draw a real, recognisable person: the director first turns every name into
+ * general traits (age range, build, skin tone, hair, style, energy), and the portrait is of an
+ * original person with a face of their own.
+ */
+const NeutralSchema = z.object({
+  traits: z.string().describe('The look in general physical and style terms only: age range, gender, build, skin tone, hair, facial hair, style, energy. No names of any person.'),
+});
+const NEUTRAL_SYSTEM =
+  'You help cast an ORIGINAL character for a music video. The artist may describe the look by naming real or famous people. Translate the description into general, ' +
+  'non-identifying traits only (age range, gender presentation, build, skin tone, hair, facial hair, style, energy) that suit the character. Never name anyone, never mention ' +
+  'distinctive features that would identify a specific real person (no signature tattoos, scars or famous hairstyles of a named person). The result must describe someone new.';
+
+const ORIGINAL =
+  'An original, entirely fictional person with their own distinct face: not any real, famous or recognisable individual and must not resemble any celebrity; a believable real human, not a model-perfect AI face.';
+
+async function neutralTraits(description: string, lookLike: string | undefined): Promise<string> {
+  const text = [description, lookLike ? `Looks a bit like: ${lookLike}` : ''].filter(Boolean).join('\n');
+  // Only worth an AI pass when a name might be in there (capitalised words beyond the start, or the "looks like" field).
+  if (!lookLike && !/\b(like|resembl|looks? as|similar to)\b/i.test(description)) return description;
+  try {
+    const { data } = await parse('music-video', NeutralSchema, NEUTRAL_SYSTEM, [{ type: 'text', text }]);
+    return data.traits.trim() || description;
+  } catch (error) {
+    logger.warn({ err: error }, 'character look: could not neutralise the description; using it without the names');
+    return description.replace(/\b(like|resembl\w*|similar to)\b[^;,.]*/gi, '').trim();
+  }
+}
 
 const REAL =
   'A real photograph from a real camera: natural light, true colour, real skin with pores, small imperfections and natural asymmetry, accurate hands; ' +
@@ -65,23 +97,25 @@ export async function lookCost(): Promise<number> {
   return costs.image + costs.imageEdit + costs.mvCasting;
 }
 
-export async function createCharacterLook(auth: AuthContext, workspaceId: string, projectId: string, characterId: string, input: { dryRun: boolean }, ip: string | null) {
+export async function createCharacterLook(auth: AuthContext, workspaceId: string, projectId: string, characterId: string, input: { dryRun: boolean; lookLike?: string | undefined }, ip: string | null) {
   await access(auth, workspaceId, true);
   const { project, mv } = await load(workspaceId, projectId);
   assertStage(mv, 'CHARACTERS');
   const character = await loadCharacter(projectId, characterId);
-  const description = describeCharacter(character);
+  const written = describeCharacter(character);
   const settings = await getStudioSettings();
   const imageTokens = settings.costs.image + settings.costs.imageEdit;
   const total = imageTokens + settings.costs.mvCasting;
   if (input.dryRun) return { estimate: { tokens: total }, project: null };
-  if (description.length < 12 && !mv.vision.trim()) throw AppError.badRequest(`Describe ${character.name} first (gender, age, build, skin tone, hair, outfit…): the photo is made from it.`);
+  if (written.length < 12 && !input.lookLike?.trim() && !mv.vision.trim()) throw AppError.badRequest(`Describe ${character.name} first (gender, age, build, skin tone, hair, outfit…): the photo is made from it.`);
   if (character.likenessUserId) throw AppError.badRequest(`${character.name} uses a saved likeness ("This is me"): no generated look is needed.`);
   if (!fal.falConfigured() || !settings.models.textToImage.enabled || !settings.models.imageEdit.enabled) {
     throw new AppError(503, 'INTERNAL_ERROR', `Character photos are not switched on yet (the ${ENGINE_NAME} is not connected).`);
   }
   await assertStorage(auth, 6 * 1024 * 1024, 'the character photos');
 
+  // Famous names become general traits before anything reaches the image model.
+  const description = await neutralTraits(written, input.lookLike?.trim() || undefined);
   const place = placeText(parseDirection(mv.direction), mv.lyrics?.voice ?? null);
   const world = [mv.vision.trim().slice(0, 300), place].filter(Boolean).join(' · ');
   const { reservation } = await reserveTokens(auth, workspaceId, 'MV_CASTING', imageTokens, { projectId, characterId, look: true });
@@ -94,7 +128,7 @@ export async function createCharacterLook(auth: AuthContext, workspaceId: string
       ...settings.models.textToImage.extra,
       prompt:
         `Head-and-shoulders portrait photograph of ${character.name}, a music-video character: ${description || 'an ordinary, believable person'}. ` +
-        `Facing the camera, neutral relaxed expression, eyes to the lens, even soft daylight, plain softly blurred background. ${world ? `The video's world: ${world}. ` : ''}${REAL}`,
+        `Facing the camera, neutral relaxed expression, eyes to the lens, even soft daylight, plain softly blurred background. ${world ? `The video's world: ${world}. ` : ''}${ORIGINAL} ${REAL}`,
       aspect_ratio: '3:4',
     });
     spent += settings.costs.image;

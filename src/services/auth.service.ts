@@ -187,7 +187,7 @@ export async function register(input: RegisterInput, meta: RequestMeta): Promise
   }
   await sql`UPDATE users SET first_name = ${input.firstName}, last_name = ${input.lastName} WHERE id = ${user.id}`.catch((error: unknown) => logger.warn({ err: error, userId: user.id }, 'first/last name not saved'));
   await recordSecurityEvent('REGISTERED', meta, user.id);
-  // The address was proven by the code: verified now, welcome tokens granted; the super admins hear about it.
+  // The address was proven by the code: verified now (no free tokens); the super admins hear about it.
   await markVerifiedAtSignup(user.id);
   void notifyNewUser({ id: user.id, name: displayName, email: input.email, role: input.role });
   return challengeFor(user);

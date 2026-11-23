@@ -231,14 +231,16 @@ export function lockToSong<T extends LockableScene>(scenes: T[], context: SongCo
   let at = 0;
   for (const [index, scene] of scenes.entries()) {
     let end = at + scene.durationSec;
+    // Usually one shot (≤ 10 s); a scene the plan made longer keeps its length (filmed as an extended shot, ≤ 30 s).
+    const cap = Math.max(10, Math.min(30, Math.ceil(scene.durationSec + 1)));
     if (index < scenes.length - 1 && downbeats.length) {
-      // Nearest downbeat that keeps the scene 3-10 s, preferring ones not inside a word.
-      const candidates = downbeats.filter((beat) => beat - at >= 3 && beat - at <= 10 && Math.abs(beat - end) <= (bar ?? 1) * 0.75);
+      // Nearest downbeat that keeps the scene 3 s to its cap, preferring ones not inside a word.
+      const candidates = downbeats.filter((beat) => beat - at >= 3 && beat - at <= cap && Math.abs(beat - end) <= (bar ?? 1) * 0.75);
       const clean = candidates.filter((beat) => !inWord(beat));
       const pick = (clean.length ? clean : candidates).sort((a, b) => Math.abs(a - end) - Math.abs(b - end))[0];
       if (pick !== undefined) end = pick;
     }
-    scene.durationSec = index < scenes.length - 1 ? Math.min(10, Math.max(3, +(end - at).toFixed(2))) : clamp(end - at);
+    scene.durationSec = index < scenes.length - 1 ? Math.min(cap, Math.max(3, +(end - at).toFixed(2))) : clamp(end - at);
     const words = linesIn(context, at, at + scene.durationSec);
     const sung = sungSeconds(context, at, at + scene.durationSec);
     if (context.lines.length) {

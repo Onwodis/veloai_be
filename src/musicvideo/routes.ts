@@ -330,7 +330,8 @@ musicVideoRouter.delete('/:projectId/characters/:characterId/media/:assetId', va
   return { project: await director.removeCharacterMedia(requireAuth(req), workspaceId, projectId, characterId, assetId) };
 }));
 /* No real photo: create the character's look (portrait + full body) from the description, then the casting sheet. */
-const lookBody = z.strictObject({ dryRun: z.boolean().default(false) });
+// lookLike: optional "looks a bit like…" (famous people are turned into general traits, never copied).
+const lookBody = z.strictObject({ dryRun: z.boolean().default(false), lookLike: z.string().trim().max(300).optional() });
 musicVideoRouter.post('/:projectId/characters/:characterId/create-look', validate({ params: characterParams, body: lookBody }), send(async (req, res) => {
   const { workspaceId, projectId, characterId } = p(res, characterParams);
   return characterLook.createCharacterLook(requireAuth(req), workspaceId, projectId, characterId, validBody(req, lookBody), req.ip ?? null);

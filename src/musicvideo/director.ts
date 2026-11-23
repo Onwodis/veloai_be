@@ -295,6 +295,13 @@ const PlannedScene = z.object({
     ),
   shot: z.enum(SHOT_IDS),
   transition: z.enum(TRANSITION_IDS).describe('Transition INTO the next scene'),
+  speed: z
+    .enum(['normal', 'slow-motion', 'dramatic-slow', 'fast'])
+    .describe(
+      'How the shot plays in the edit, the way a music-video editor uses speed: "slow-motion" for reveals, entrances and sensual or emotional beats (a woman stepping out of a car, ' +
+        'heels touching the ground and hands before the face is revealed; hair and fabric in the wind; a slow turn to camera; a drop or the first chorus hit), "dramatic-slow" for the ' +
+        'single biggest moment of the video, "fast" for a quick, high-energy cut, otherwise "normal". Use slow motion on purpose (a few shots, never most). Lip-synced shots are always "normal".',
+    ),
   durationSec: z
     .number()
     .describe(
@@ -462,7 +469,10 @@ export async function storyboard(
   const scenes = (timed ? ordered : data.scenes).map(({ characterIndexes, startSec: _start, ...scene }, index, list) => {
     const next = list[index + 1]?.startSec ?? (end > 0 ? end : _start + scene.durationSec);
     const fromStarts = timed ? next - _start : scene.durationSec;
-    return { ...scene, durationSec: clampDuration(fromStarts > 0 ? fromStarts : scene.durationSec), characterIds: idsFor(characterIndexes, context) };
+    // The scene keeps its real span on the song (a long verse stays long): fitToSong splits it into
+    // consecutive parts that follow the words, instead of cutting it short and padding with copies.
+    const span = fromStarts > 0 ? Math.round(Math.min(120, Math.max(3, fromStarts)) * 2) / 2 : clampDuration(scene.durationSec);
+    return { ...scene, durationSec: span, characterIds: idsFor(characterIndexes, context) };
   });
   // Enforce the bookends even if the model slipped.
   if (scenes.length && scenes[0]!.kind !== 'INTRO') scenes[0]!.kind = 'INTRO';

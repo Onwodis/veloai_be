@@ -19,7 +19,8 @@ import { logger } from '../../utils/logger.js';
 import type { RenderedMail } from './templates.js';
 import { testMail } from './templates.js';
 
-const TIMEOUT_MS = 12_000;
+// Some mail servers take 8-10 s just to say hello on a slow link: give them room.
+const TIMEOUT_MS = 25_000;
 
 export interface PublicSmtpCredential {
   id: string;
@@ -385,4 +386,24 @@ export async function recentMail(limit = 25): Promise<
     createdAt: row.createdAt.toISOString(),
     credentialLabel: row.credential?.label ?? null,
   }));
+}
+
+/**
+ * Sends without making the caller wait (codes and links): the request answers straight away and the
+ * mail goes out behind it, retried a few times if the mail server is slow or briefly unreachable.
+ * Waiting on the mail server inside the request is what turned a slow handshake into a bare 502
+ * from the proxy. Every attempt is recorded in the mail log (super admin → email).
+ */
+export function sendMailInBackground(to: string, mail: RenderedMail): void {
+  const delays = [0, 5_000, 20_000];
+  const attempt = async (index: number): Promise<void> => {
+    await new Promise((resolve) => setTimeout(resolve, delays[index]));
+    try {
+      await sendMail(to, mail);
+    } catch (error) {
+      if (index + 1 < delays.length) return attempt(index + 1);
+      logger.error({ template: mail.template, err: error }, 'mail not delivered after retries');
+    }
+  };
+  void attempt(0);
 }

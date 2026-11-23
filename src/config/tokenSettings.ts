@@ -97,7 +97,8 @@ export const DEFAULT_TOKEN_SETTINGS: TokenSettings = {
   minimumStartBalance: 100,
   reserveBufferPercent: 15,
   reservationTtlMinutes: 120,
-  signupBonus: 250,
+  // No free tokens: every account starts at 0 and buys (owner decision, 2026-11-23).
+  signupBonus: 0,
   superAdminMode: 'UNLIMITED',
   dailyEngineCap: 20_000,
   testPurchases: 'EVERYONE',
