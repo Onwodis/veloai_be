@@ -66,6 +66,9 @@ export const textStyleSchema = z.strictObject({
   outline: z.number().min(0).max(8),
   shadow: z.number().min(0).max(8),
   position: z.enum(['top', 'middle', 'lower-third', 'bottom']),
+  /** Dragged on the screen: the text's centre as fractions of the frame (0-1). Wins over `position`. */
+  x: z.number().min(0).max(1).optional(),
+  y: z.number().min(0).max(1).optional(),
   align: z.enum(['left', 'center', 'right']),
   in: z.enum(TEXT_IN),
   out: z.enum(TEXT_OUT),
@@ -187,11 +190,14 @@ export const fontPx = (style: TextStyle, frame: TextFrame): number => Math.max(8
 const ALIGN = { left: 0, center: 1, right: 2 } as const;
 /** ASS numpad alignment: 1-3 bottom, 4-6 middle, 7-9 top. */
 function anchor(style: TextStyle): number {
+  // Dragged text is anchored on its centre (the point the user placed).
+  if (style.x !== undefined && style.y !== undefined) return 5;
   const column = ALIGN[style.align] + 1;
   return style.position === 'top' ? 6 + column : style.position === 'middle' ? 3 + column : column;
 }
 /** Where the text sits (the \pos point for its anchor). */
 function point(style: TextStyle, frame: TextFrame): { x: number; y: number } {
+  if (style.x !== undefined && style.y !== undefined) return { x: Math.round(frame.width * style.x), y: Math.round(frame.height * style.y) };
   const marginX = Math.round(frame.width * 0.08);
   const x = style.align === 'left' ? marginX : style.align === 'right' ? frame.width - marginX : Math.round(frame.width / 2);
   const y =

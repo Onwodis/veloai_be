@@ -43,33 +43,70 @@ import { parseDirection, placeText } from './songmap.js';
  * general traits (age range, build, skin tone, hair, style, energy), and the portrait is of an
  * original person with a face of their own.
  */
-const NeutralSchema = z.object({
-  traits: z.string().describe('The look in general physical and style terms only: age range, gender, build, skin tone, hair, facial hair, style, energy. No names of any person.'),
-});
-const NEUTRAL_SYSTEM =
-  'You help cast an ORIGINAL character for a music video. The artist may describe the look by naming real or famous people. Translate the description into general, ' +
-  'non-identifying traits only (age range, gender presentation, build, skin tone, hair, facial hair, style, energy) that suit the character. Never name anyone, never mention ' +
-  'distinctive features that would identify a specific real person (no signature tattoos, scars or famous hairstyles of a named person). The result must describe someone new.';
-
 const ORIGINAL =
   'An original, entirely fictional person with their own distinct face: not any real, famous or recognisable individual and must not resemble any celebrity; a believable real human, not a model-perfect AI face.';
 
-async function neutralTraits(description: string, lookLike: string | undefined): Promise<string> {
+/**
+ * The words that make image models' safety filters black out a photo (sexual words, sizes of intimate
+ * body parts) even when the brief is an ordinary music-video casting. Used when the director can't be
+ * reached: the look is kept, the trigger words go.
+ */
+const FILTER_WORDS: [RegExp, string][] = [
+  [/\b(big|huge|large|fat|thick)\s+(bum\s*bum|bum|booty|butt|backside|behind|ass)\b/gi, 'full hips'],
+  [/\b(bum\s*bum|booty|butt|ass)\b/gi, 'hips'],
+  [/\b(moderate|small|big|huge|large)\s+(breasts?|boobs?|chest|bust)(\s+size)?\b/gi, ''],
+  [/\b(breasts?|boobs?|cleavage|nipples?)\b/gi, ''],
+  [/\b(extremely|very|super)\s+(sexy|hot)\b/gi, 'striking'],
+  [/\b(sexy|hot|seductive|sensual|naughty|kinky|erotic|nude|naked|horny|lingerie)\b/gi, 'confident'],
+];
+
+function filterSafe(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of FILTER_WORDS) out = out.replace(pattern, replacement);
+  return out.replace(/\b(confident)(\s*,?\s*confident)+\b/gi, '$1').replace(/\s{2,}/g, ' ').replace(/\s+([,;.])/g, '$1').replace(/([,;])\s*[,;]+/g, '$1').trim();
+}
+
+const BriefSchema = z.object({
+  look: z
+    .string()
+    .describe(
+      'The character as a casting director and stylist would brief a photographer: age range, gender, ethnicity/heritage when given, skin tone, face, hair, build and figure ' +
+        '(e.g. "curvy hourglass figure, full hips and thighs"), height, energy and attitude, styling. Keep every physical intent of the artist; professional, non-explicit words only; no names of anyone.',
+    ),
+});
+const BRIEF_SYSTEM =
+  'You are the casting director of a music video, turning the artist\'s notes into a brief for a photographer and an image model. Keep everything the artist wants: ' +
+  'beauty, body type and figure (curvy, hourglass, full hips, slim, athletic, plus-size…), heritage and skin tone, age, hair, confidence and attitude. Write it the way ' +
+  'a professional casting brief or fashion shoot call sheet does: respectful, concrete, tasteful. Image models block sexual wording and sizes of intimate body parts, so ' +
+  'say figure and attitude in styling terms instead (e.g. "big bum bum" → "full, curvy hips"; "extremely sexy, naughty" → "magnetic, playful, confident"), never in sexual terms. ' +
+  'Never name a real or famous person: turn "looks like X" into general traits (age range, build, skin tone, hair, style, energy). The person must be someone new.';
+
+/**
+ * The description a photo is made from: the artist's notes as a professional casting brief that
+ * keeps the look (beautiful, curvy, African, confident…) in words image filters accept, with famous
+ * names turned into general traits. Falls back to the notes with the trigger words removed.
+ */
+export async function castingBrief(description: string, lookLike: string | undefined): Promise<string> {
   const text = [description, lookLike ? `Looks a bit like: ${lookLike}` : ''].filter(Boolean).join('\n');
-  // Only worth an AI pass when a name might be in there (capitalised words beyond the start, or the "looks like" field).
-  if (!lookLike && !/\b(like|resembl|looks? as|similar to)\b/i.test(description)) return description;
   try {
-    const { data } = await parse('music-video', NeutralSchema, NEUTRAL_SYSTEM, [{ type: 'text', text }]);
-    return data.traits.trim() || description;
+    const { data } = await parse('music-video', BriefSchema, BRIEF_SYSTEM, [{ type: 'text', text }]);
+    return filterSafe(data.look.trim()) || filterSafe(description);
   } catch (error) {
-    logger.warn({ err: error }, 'character look: could not neutralise the description; using it without the names');
-    return description.replace(/\b(like|resembl\w*|similar to)\b[^;,.]*/gi, '').trim();
+    logger.warn({ err: error }, 'character look: casting brief unavailable; using the notes with trigger words removed');
+    return filterSafe(description.replace(/\b(like|resembl\w*|similar to)\b[^;,.]*/gi, ''));
   }
 }
 
 const REAL =
   'A real photograph from a real camera: natural light, true colour, real skin with pores, small imperfections and natural asymmetry, accurate hands; ' +
   'no retouching, no beauty filter, no illustration, no text, no watermark. Tasteful and fully clothed.';
+
+/** The image model's safety filter blocked the photo (it came back black and flagged). */
+class BlockedImage extends Error {
+  constructor() {
+    super('blocked by the image safety filter');
+  }
+}
 
 /** The character in words, from everything the artist filled in. */
 export function describeCharacter(character: Pick<CharacterRow, 'name' | 'attributes' | 'costumes'>): string {
@@ -114,33 +151,67 @@ export async function createCharacterLook(auth: AuthContext, workspaceId: string
   }
   await assertStorage(auth, 6 * 1024 * 1024, 'the character photos');
 
-  // Famous names become general traits before anything reaches the image model.
-  const description = await neutralTraits(written, input.lookLike?.trim() || undefined);
+  // A professional casting brief (keeps the look, drops words image filters block, no famous names).
+  const description = await castingBrief(written, input.lookLike?.trim() || undefined);
   const place = placeText(parseDirection(mv.direction), mv.lyrics?.voice ?? null);
   const world = [mv.vision.trim().slice(0, 300), place].filter(Boolean).join(' · ');
   const { reservation } = await reserveTokens(auth, workspaceId, 'MV_CASTING', imageTokens, { projectId, characterId, look: true });
   const dir = await mkdtemp(join(tmpdir(), 'mv-look-'));
   let spent = 0;
   try {
-    const run = async (endpoint: string, body: Record<string, unknown>): Promise<string> => fal.outputUrl(await fal.wait(await fal.submit(endpoint, body), { timeoutMs: 5 * 60_000 }), 'image');
+    // A photo the model's safety filter blocked comes back black and flagged: never keep it.
+    const run = async (endpoint: string, body: Record<string, unknown>): Promise<string> => {
+      const result = await fal.wait<Record<string, unknown>>(await fal.submit(endpoint, body), { timeoutMs: 5 * 60_000 });
+      const flags = result['has_nsfw_concepts'];
+      if (Array.isArray(flags) && flags.some(Boolean)) throw new BlockedImage();
+      return fal.outputUrl(result, 'image');
+    };
+    // One retry when blocked (or no image came back): same person, more conservative framing and wording.
+    const attempt = async (endpoint: string, body: Record<string, unknown>, safer: Record<string, unknown>): Promise<string> => {
+      try {
+        return await run(endpoint, body);
+      } catch (error) {
+        if (!(error instanceof BlockedImage) && !(error instanceof fal.FalError && /returned no image/i.test(error.message))) throw error;
+        logger.warn({ characterId, endpoint }, 'character look: image blocked or empty; retrying with safer wording');
+        try {
+          return await run(endpoint, safer);
+        } catch (again) {
+          if (again instanceof BlockedImage || (again instanceof fal.FalError && /returned no image/i.test(again.message))) {
+            throw new AppError(
+              422,
+              'BAD_REQUEST',
+              `The image model's safety filter blocked ${character.name}'s photo. Describe the look in styling terms (figure, outfit, attitude) rather than body-part sizes or "sexy" words, and try again. Nothing was charged for the blocked photo.`,
+            );
+          }
+          throw again;
+        }
+      }
+    };
+    const safe = filterSafe(description);
     // 1. The face: a clean, front-facing portrait (the identity reference every shot uses).
-    const faceUrl = await run(settings.models.textToImage.endpoint, {
+    const portrait = (look: string): Record<string, unknown> => ({
       ...settings.models.textToImage.extra,
       prompt:
-        `Head-and-shoulders portrait photograph of ${character.name}, a music-video character: ${description || 'an ordinary, believable person'}. ` +
-        `Facing the camera, neutral relaxed expression, eyes to the lens, even soft daylight, plain softly blurred background. ${world ? `The video's world: ${world}. ` : ''}${ORIGINAL} ${REAL}`,
+        `Head-and-shoulders portrait photograph of ${character.name}, a music-video character: ${look || 'an ordinary, believable person'}. ` +
+        `Facing the camera, neutral relaxed expression, eyes to the lens, even soft daylight, plain softly blurred background. ${world ? `The video's world: ${filterSafe(world)}. ` : ''}${ORIGINAL} ${REAL}`,
       aspect_ratio: '3:4',
     });
+    const faceUrl = await attempt(settings.models.textToImage.endpoint, portrait(description), portrait(`${safe}. Elegant, modest styling; a fashion-magazine casting portrait`));
     spent += settings.costs.image;
     // 2. The full body: the same person (from the portrait), standing, in the first outfit.
-    const bodyUrl = await run(settings.models.imageEdit.endpoint, {
+    const outfit = character.costumes[0] ? filterSafe(character.costumes[0].description) : '';
+    const fullBody = (wearing: string, figure: string): Record<string, unknown> => ({
       ...settings.models.imageEdit.extra,
       prompt:
-        `A new full-body photograph of the exact person in the reference image (identical face, skin tone, hair, age and build), standing naturally, ` +
-        `whole body visible head to toe, facing the camera, ${character.costumes[0] ? `wearing ${character.costumes[0].description}` : 'in everyday clothes that suit them'}, ` +
-        `plain real-world background, soft daylight. ${REAL}`,
+        `A new full-body photograph of the exact person in the reference image (identical face, skin tone, hair and age), ${figure}, standing naturally, ` +
+        `whole body visible head to toe, facing the camera, ${wearing}, plain real-world background, soft daylight. ${REAL}`,
       image_urls: [faceUrl],
     });
+    const bodyUrl = await attempt(
+      settings.models.imageEdit.endpoint,
+      fullBody(outfit ? `wearing ${outfit}` : 'in clothes that suit them', `with the build and figure described here: ${description.slice(0, 400)}`),
+      fullBody('in an elegant, well-fitted outfit that suits them', `with the build and figure described here: ${safe.slice(0, 300)}`),
+    );
     spent += settings.costs.imageEdit;
 
     // 3. Both become the character's photos.

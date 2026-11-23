@@ -443,6 +443,17 @@ export async function discuss(context: DirectorContext, history: { author: 'CREA
 const OutlineSchema = z.object({
   logline: z.string().describe('One-sentence story of the video'),
   arc: z.string().describe('How the story and performance build across the song: set-up, rise, peak on the hooks, turn at the bridge, resolution. 2-4 sentences.'),
+  lookbook: z
+    .array(
+      z.object({
+        sequence: z.string().describe('Short name of a continuous stretch of the video in one place and time, e.g. "Club arrival", "Rooftop at night"'),
+        setting: z.string().describe('The set as the camera sees it, used for every scene of this sequence: venue, decor, light, colour palette, time of day'),
+        wardrobe: z
+          .string()
+          .describe("Each person's complete look in this sequence, by name: outfit and colour, shoes, accessories, hair, makeup and polish/glam level. Worn identically in every scene of the sequence."),
+      }),
+    )
+    .describe('Continuity bible: one entry per sequence, in story order'),
   beats: z.array(
     z.object({
       kind: z.enum(['INTRO', 'STORY', 'OUTRO']),
@@ -451,6 +462,7 @@ const OutlineSchema = z.object({
       beat: z.string().describe('What happens in this moment, concretely (action, who, where, what changes since the previous beat). 1-2 sentences, never a repeat of another beat.'),
       lyricCue: z.string().describe('The words sung under this beat (from the song map), or the section name for instrumental parts'),
       location: z.string().describe('Short location name'),
+      sequence: z.string().describe('The lookbook sequence this beat belongs to (its exact name)'),
       mode: PlannedScene.shape.mode,
       characterIndexes: z.array(z.number().int()).describe('Indexes (C0, C1…) of the characters in this beat'),
     }),
@@ -506,6 +518,10 @@ async function outlineBeats(context: DirectorContext, discussion: string, count:
       'so what happens follows what is being sung (a line about leaving shows the leaving, a hook gets the biggest performance moment). ' +
       "The <scenes> list is the current draft and the artist's own ideas: keep the artist's ideas that fit, in spirit and order, and never repeat a scene. " +
       'Set mode PERFORMANCE where the artist sings to camera. ' +
+      'Continuity like a real production: group the beats into sequences (a continuous stretch in one place and time) and write a lookbook entry for each. ' +
+      "Within a sequence every person keeps exactly the same outfit, colours, hair, makeup and level of polish, and the set keeps the same venue, light and palette; " +
+      'change a look or a place only at a sequence change with a story reason (a new day, a new venue, a costume change the story shows). A glamorous lead stays glamorous ' +
+      "unless the story says otherwise. Use the cast's costumes when given; consecutive sequences in the same venue keep the same set. " +
       `${PRO_RULES} ${RULES}`,
     [
       {
@@ -519,15 +535,25 @@ async function outlineBeats(context: DirectorContext, discussion: string, count:
   return data;
 }
 
-function beatLines(beats: OutlineBeat[], start: number, end: number): string {
+/** The lookbook entry for a beat (its sequence), or the nearest one. */
+function lookFor(outline: Outline, item: OutlineBeat): Outline['lookbook'][number] | undefined {
+  const name = item.sequence.trim().toLowerCase();
+  return outline.lookbook.find((entry) => entry.sequence.trim().toLowerCase() === name) ?? outline.lookbook.find((entry) => name.includes(entry.sequence.trim().toLowerCase()));
+}
+
+function beatLines(outline: Outline, start: number, end: number): string {
+  const beats = outline.beats;
   const from = Math.max(0, start);
   return beats
     .slice(from, Math.max(from, end))
-    .map(
-      (item, offset) =>
-        `B${from + offset} [${item.kind}${item.mode ? ` · ${item.mode}` : ''}] at ${item.startSec}s · ${item.title} @ ${item.location}: ${item.beat} ` +
-        `(under: ${item.lyricCue}) cast: ${item.characterIndexes.map((index) => `C${index}`).join(', ') || 'none'}`,
-    )
+    .map((item, offset) => {
+      const look = lookFor(outline, item);
+      return (
+        `B${from + offset} [${item.kind}${item.mode ? ` · ${item.mode}` : ''}] at ${item.startSec}s · sequence "${item.sequence}" · ${item.title} @ ${item.location}: ${item.beat} ` +
+        `(under: ${item.lyricCue}) cast: ${item.characterIndexes.map((index) => `C${index}`).join(', ') || 'none'}` +
+        (look ? `\n   set: ${look.setting}\n   wardrobe: ${look.wardrobe}` : '')
+      );
+    })
     .join('\n');
 }
 
@@ -540,15 +566,17 @@ async function writeBatch(context: DirectorContext, outline: Outline, from: numb
       `Write out beats B${from} to B${to - 1} of the outline as full scenes: exactly one scene per beat, in order, keeping each beat's kind, startSec, cast and idea. ` +
       'Each scene has its own action, framing and camera move; it continues from the beat before it and leads into the next, and never repeats it. ' +
       'The lyric field is the words under that beat. Set lipSync true exactly for PERFORMANCE scenes. ' +
+      "Continuity: the costume field is the beat's wardrobe, word for word, and the prompt describes that same wardrobe (colours, polish, hair, makeup) and that same set and light; " +
+      'never change a look or the set inside a sequence. ' +
       `${PRO_RULES} ${RULES} ${shotGuide}`,
     [
       {
         type: 'text',
         text:
           `${contextText(context)}\n\n<outline logline="${outline.logline.replace(/"/g, "'")}">\n<arc>${outline.arc}</arc>\n` +
-          (from > 0 ? `<before>\n${beatLines(beats, from - 2, from)}\n</before>\n` : '') +
-          `<write_these>\n${beatLines(beats, from, to)}\n</write_these>\n` +
-          (to < beats.length ? `<after>\n${beatLines(beats, to, to + 2)}\n</after>\n` : '') +
+          (from > 0 ? `<before>\n${beatLines(outline, from - 2, from)}\n</before>\n` : '') +
+          `<write_these>\n${beatLines(outline, from, to)}\n</write_these>\n` +
+          (to < beats.length ? `<after>\n${beatLines(outline, to, to + 2)}\n</after>\n` : '') +
           '</outline>',
       },
     ],
@@ -626,8 +654,15 @@ export async function storyboard(
       await onProgress?.(`Wrote scenes ${from + 1}–${to} (${done} of ${outline.beats.length})…`, 0.3 + 0.6 * (done / outline.beats.length));
       // One scene per beat, in order; anything still missing falls back to the beat itself.
       return outline.beats.slice(from, to).map((item, offset) => {
-        const scene = written[offset];
-        return scene ? { ...scene, kind: item.kind, startSec: item.startSec } : fromBeat(item);
+        const scene = written[offset] ? { ...written[offset]!, kind: item.kind, startSec: item.startSec } : fromBeat(item);
+        // Continuity: the sequence's wardrobe and set are the same in every scene of it.
+        const look = lookFor(outline, item);
+        if (look) {
+          scene.costume = look.wardrobe.slice(0, 500);
+          scene.location = item.location;
+          if (!scene.prompt.includes(look.setting.slice(0, 40))) scene.prompt = `${scene.prompt} Set and light (same as the rest of this sequence): ${look.setting}. Wardrobe: ${look.wardrobe}.`;
+        }
+        return scene;
       });
     }),
   );
@@ -692,6 +727,7 @@ export async function rewriteScenes(
           'Write a new script for each scene listed in <rewrite>: exactly one scene per index, its own moment on the song. Keep its kind, its place and length on the song and the words under it; ' +
           'make what happens follow those words and continue the story from the scene before it into the scene after it (see <scenes>). ' +
           'Every rewritten scene must differ from every other scene on the board and from each other: a new action, place, angle or turn in the story, never the same title or script. ' +
+          "Continuity: when the scene before or after is in the same place, keep that scene's wardrobe (copy its costume text), hair, makeup, polish and set look exactly; a look or set changes only where the story moves somewhere new. " +
           "Stay true to the artist's vision, mood, cast and place. Set lipSync true exactly for PERFORMANCE scenes. " +
           `${PRO_RULES} ${RULES} ${shotGuide}`,
         [{ type: 'text', text: `${contextText(board)}\n\n${used ? `<titles_taken>${used}</titles_taken>\n` : ''}<rewrite>\n${slots}\n</rewrite>` }],
@@ -701,10 +737,14 @@ export async function rewriteScenes(
       const index = group.includes(item.index) ? item.index : group[position];
       if (index === undefined) return;
       const { characterIndexes, index: _index, ...scene } = item;
-      out.set(index, { ...scene, characterIds: idsFor(characterIndexes, context) });
+      // Same place as the scene before: same wardrobe (continuity), unless the writer gave none.
+      const before = board.scenes[index - 1];
+      const samePlace = before?.location && key(before.location) === key(scene.location);
+      const costume = samePlace && before?.costume ? before.costume : scene.costume;
+      out.set(index, { ...scene, costume, characterIds: idsFor(characterIndexes, context) });
       titles.set(index, scene.title);
       // The board now shows the new script, so the next batch builds on it.
-      board.scenes[index] = { ...board.scenes[index]!, description: scene.description, prompt: scene.prompt, location: scene.location, costume: scene.costume };
+      board.scenes[index] = { ...board.scenes[index]!, description: scene.description, prompt: scene.prompt, location: scene.location, costume };
     });
   };
 
@@ -735,6 +775,44 @@ export async function rewriteScenes(
     if (out.size === 0 && lastError) throw lastError;
   }
   return out;
+}
+
+/* ------------------------------------------------------------------ on-screen text */
+
+const TextIdeasSchema = z.object({
+  options: z.array(z.string().describe('One on-screen text, ready to show: short, punchy, in the voice the template is for')).describe('Three different options'),
+});
+
+/**
+ * On-screen words for a scene (a title, a lower third, a story card, a credit…), written for the
+ * template it will be shown in, from the scene, the words sung under it, the song and the artist's
+ * brief. Three options; the artist picks one and can still edit it.
+ */
+export async function suggestSceneTexts(
+  context: DirectorContext,
+  scene: { description: string; lyric: string | null; kind: string; durationSec: number },
+  template: { label: string; use: string },
+  brief: string,
+): Promise<string[]> {
+  const words = Math.max(2, Math.min(18, Math.round(scene.durationSec * 2.2)));
+  const { data } = await parse(
+    'music-video',
+    TextIdeasSchema,
+    `You are ${env.BOT_NAME}, the AI director, writing on-screen text for a music video. Write three different options for this scene, in the style the ` +
+      `template is made for ("${template.label}": ${template.use}). Each must be readable in the scene's ${scene.durationSec.toFixed(1)} seconds on screen ` +
+      `(at most about ${words} words, one or two short lines), fit the story and the words sung here, and sound like the artist's world, not like an ad. ` +
+      'Use the artist\'s exact names, places and slang when given. No hashtags, no emojis unless the brief asks; never invent facts like dates or credits that were not given.',
+    [
+      {
+        type: 'text',
+        text:
+          `<song title="${context.title}" artist="${context.artist}" genre="${context.genre}"/>\n<vision>${context.vision.slice(0, 600)}</vision>\n` +
+          `<scene kind="${scene.kind}">${scene.description.slice(0, 600)}</scene>\n<sung_here>${(scene.lyric ?? '').slice(0, 300) || 'instrumental'}</sung_here>\n` +
+          `<brief>${brief.slice(0, 400) || 'none: choose what suits the scene'}</brief>`,
+      },
+    ],
+  );
+  return data.options.map((option) => option.trim()).filter(Boolean).slice(0, 3);
 }
 
 /* ------------------------------------------------------------------ lyrics */

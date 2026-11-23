@@ -411,6 +411,13 @@ musicVideoRouter.patch('/:projectId/scenes/:sceneId', validate({ params: scenePa
   const { workspaceId, projectId, sceneId } = p(res, sceneParams);
   return { project: await director.updateScene(requireAuth(req), workspaceId, projectId, sceneId, validBody(req, sceneSchema)) };
 }));
+/* "Write it for me": on-screen text options for a scene, in a template's style. */
+const textIdeasSchema = z.strictObject({ template: z.string().trim().min(1).max(40), brief: z.string().trim().max(400).optional() });
+musicVideoRouter.post('/:projectId/scenes/:sceneId/texts/suggest', validate({ params: sceneParams, body: textIdeasSchema }), send(async (req, res) => {
+  const { workspaceId, projectId, sceneId } = p(res, sceneParams);
+  return director.suggestTexts(requireAuth(req), workspaceId, projectId, sceneId, validBody(req, textIdeasSchema));
+}));
+
 musicVideoRouter.delete('/:projectId/scenes/:sceneId', validate({ params: sceneParams }), send(async (req, res) => {
   const { workspaceId, projectId, sceneId } = p(res, sceneParams);
   return { project: await director.deleteScene(requireAuth(req), workspaceId, projectId, sceneId) };

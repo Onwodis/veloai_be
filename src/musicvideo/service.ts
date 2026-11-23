@@ -37,7 +37,7 @@ import { publishProgress } from '../realtime/events.js';
 import { arrange, fxFilters, isIdentityArrangement, mixDuration, renderMix, transcribeSong, transcriptionPrompt, videoFrames, type AudioEdits, type AudioTrack, type Clip, type Lyrics, type Region, type TrackFx } from './audio.js';
 import type { CharacterAttributes, CharacterRow, Costume } from './cast.js';
 import { meContext } from '../likeness/service.js';
-import { castCharacter, correctLyrics, detectPeople, discuss, expandScene, polishLyrics, profileVoice, proofreadLyrics, rewriteScenes, storyboard, type DirectorContext } from './director.js';
+import { castCharacter, correctLyrics, detectPeople, discuss, expandScene, polishLyrics, profileVoice, proofreadLyrics, rewriteScenes, storyboard, suggestSceneTexts, type DirectorContext } from './director.js';
 import { polishProject, type PolishReport } from './polish.js';
 import { dismissReview, reviewTake } from './review.js';
 import type { ProjectCategory } from '../config/categories.js';
@@ -45,6 +45,7 @@ import { aiMaster } from './mastering.js';
 import { ANALYSIS_VERSION, analyseAudio, type AudioAnalysis } from './analysis.js';
 import { directionSchema, lockToSong, parseDirection, placeText, songContext, songMapText, type Direction } from './songmap.js';
 import { parseTitles, titlesSchema, type Titles } from './titles.js';
+import { TEXT_TEMPLATES } from '../media/textfx.js';
 
 export const STAGES = ['SONG', 'SOUND', 'CHARACTERS', 'SCENES', 'DISCUSSION', 'STORYBOARD', 'SHOOT', 'MASTER'] as const;
 export type Stage = (typeof STAGES)[number];
@@ -607,6 +608,20 @@ export async function startScriptRegeneration(auth: AuthContext, workspaceId: st
     }
   })();
   return view(auth, workspaceId, projectId);
+}
+
+/** "Write it for me": three on-screen text options for a scene, in a template's style (charged like a director reply). */
+export async function suggestTexts(auth: AuthContext, workspaceId: string, projectId: string, sceneId: string, input: { template: string; brief?: string | undefined }) {
+  await access(auth, workspaceId, true);
+  const { project, mv } = await load(workspaceId, projectId);
+  const [scene] = await sql<SceneRow[]>`SELECT * FROM studio_scenes WHERE id = ${sceneId} AND project_id = ${projectId}`;
+  if (!scene) throw AppError.notFound('Scene');
+  const template = (TEXT_TEMPLATES as Record<string, { label: string; use: string }>)[input.template] ?? { label: 'Text', use: 'on-screen text for a music video' };
+  const { costs } = await getStudioSettings();
+  const options = await charged(auth, workspaceId, projectId, 'MV_CHAT', costs.mvChat, `Music video · ${project.title.slice(0, 50)}: on-screen text ideas`, async () =>
+    suggestSceneTexts(await directorContext(project, mv, false), { description: scene.description, lyric: scene.lyric, kind: scene.kind, durationSec: scene.durationSec }, template, input.brief?.trim() ?? ''),
+  );
+  return { options };
 }
 
 /** After a transcription: scenes that were waiting for the words are written now (or told it failed). */
@@ -1619,38 +1634,56 @@ export async function buildStoryboard(
   // Enough scenes to cover the whole song (about one every 6 s, 3-10 s each).
   const songSeconds = context.songSeconds ?? 0;
   const wanted = sceneCount ?? (songSeconds ? Math.min(settings.limits.maxScenes, Math.max(4, Math.ceil(songSeconds / 6))) : undefined);
-  const board = await charged(auth, workspaceId, projectId, 'MV_STORYBOARD', free ? 0 : settings.costs.mvStoryboard, `Music video · ${project.title.slice(0, 50)}: storyboard`, () =>
-    storyboard(context, discussion, wanted, onProgress),
-  );
-  await onProgress?.(`Placing ${board.scenes.length} scenes on the song and saving them…`, 0.95);
-  if (songSeconds > 0) fitToSong(board.scenes, songSeconds, settings.limits.maxScenes);
-  if (board.scenes.length < 2) throw new AppError(502, 'INTERNAL_ERROR', 'The director returned an incomplete storyboard. Try again.');
-  // Lock to the song: cuts on bar lines, real words under each scene, lip sync only where someone sings.
-  const song = await songContext(projectId).catch(() => null);
-  if (song && (song.lines.length || song.analysis)) lockToSong(board.scenes, song);
-  // Every old scene is replaced: their finished takes' files leave the bucket after the swap.
-  const oldTakes = await studio.finishedTakeIds(projectId);
-  await sql.begin(async (tx) => {
-    // Running takes on scenes that are being replaced are cancelled first.
-    await tx`UPDATE studio_takes SET status = 'CANCELED', finished_at = now() WHERE project_id = ${projectId} AND status IN ('QUEUED', 'KEYFRAME', 'ANIMATING', 'LIPSYNC', 'STORING')`;
-    await tx`DELETE FROM studio_scenes WHERE project_id = ${projectId}`;
-    for (const [position, scene] of board.scenes.slice(0, settings.limits.maxScenes).entries()) {
-      const lipSynced = scene.lipSync && scene.characterIds.length > 0;
-      // The director's speed effect plays in the edit (lip-synced shots stay at 1×).
-      const speed = lipSynced ? 1 : (SPEED_OF[scene.speed ?? 'normal'] ?? 1);
-      await tx`
-        INSERT INTO studio_scenes (project_id, position, kind, title, subtitle, description, prompt, shot, transition, duration_sec, features_subject, lip_sync, character_ids, costume, location, time_of_day, lyric, mode, emotion, intensity, edits)
-        VALUES (${projectId}, ${position}, ${scene.kind}, ${scene.title.slice(0, 80)}, ${scene.subtitle.slice(0, 120)}, ${scene.description.slice(0, 1000)}, ${`${scene.prompt}${slowMotionNote(scene.speed, lipSynced)}`.slice(0, 2000)}, ${scene.shot}, ${scene.transition}, ${scene.durationSec},
-          ${scene.characterIds.length > 0}, ${scene.lipSync && scene.characterIds.length > 0}, ${scene.characterIds}::uuid[], ${scene.costume.slice(0, 500)},
-          ${scene.location.slice(0, 200)}, ${scene.timeOfDay.slice(0, 24)}, ${scene.lyric.slice(0, 300)},
-          ${scene.lipSync && scene.characterIds.length > 0 ? 'PERFORMANCE' : scene.mode === 'PERFORMANCE' ? 'NARRATIVE' : (scene.mode ?? null)},
-          ${scene.lipSync ? (scene.emotion ?? null) : null}, ${intensityLevel(scene.intensity)}, ${speed === 1 ? null : json({ speed })})`;
-    }
+  // Charged only once the new scenes are saved: a failure anywhere (the AI, fitting, saving) releases the hold.
+  const { board, oldTakes } = await charged(auth, workspaceId, projectId, 'MV_STORYBOARD', free ? 0 : settings.costs.mvStoryboard, `Music video · ${project.title.slice(0, 50)}: storyboard`, async () => {
+    const board = await storyboard(context, discussion, wanted, onProgress);
+    await onProgress?.(`Placing ${board.scenes.length} scenes on the song and saving them…`, 0.95);
+    if (songSeconds > 0) fitToSong(board.scenes, songSeconds, settings.limits.maxScenes);
+    if (board.scenes.length < 2) throw new AppError(502, 'INTERNAL_ERROR', 'The director returned an incomplete storyboard. Try again.');
+    // Lock to the song: cuts on bar lines, real words under each scene, lip sync only where someone sings.
+    const song = await songContext(projectId).catch(() => null);
+    if (song && (song.lines.length || song.analysis)) lockToSong(board.scenes, song);
+    holdContinuity(board.scenes);
+    // Every old scene is replaced: their finished takes' files leave the bucket after the swap.
+    const oldTakes = await studio.finishedTakeIds(projectId);
+    await sql.begin(async (tx) => {
+      // Running takes on scenes that are being replaced are cancelled first.
+      await tx`UPDATE studio_takes SET status = 'CANCELED', finished_at = now() WHERE project_id = ${projectId} AND status IN ('QUEUED', 'KEYFRAME', 'ANIMATING', 'LIPSYNC', 'STORING')`;
+      await tx`DELETE FROM studio_scenes WHERE project_id = ${projectId}`;
+      for (const [position, scene] of board.scenes.slice(0, settings.limits.maxScenes).entries()) {
+        const lipSynced = scene.lipSync && scene.characterIds.length > 0;
+        // The director's speed effect plays in the edit (lip-synced shots stay at 1×).
+        const speed = lipSynced ? 1 : (SPEED_OF[scene.speed ?? 'normal'] ?? 1);
+        await tx`
+          INSERT INTO studio_scenes (project_id, position, kind, title, subtitle, description, prompt, shot, transition, duration_sec, features_subject, lip_sync, character_ids, costume, location, time_of_day, lyric, mode, emotion, intensity, edits)
+          VALUES (${projectId}, ${position}, ${scene.kind}, ${scene.title.slice(0, 80)}, ${scene.subtitle.slice(0, 120)}, ${scene.description.slice(0, 1000)}, ${`${scene.prompt}${slowMotionNote(scene.speed, lipSynced)}`.slice(0, 2000)}, ${scene.shot}, ${scene.transition}, ${scene.durationSec},
+            ${scene.characterIds.length > 0}, ${scene.lipSync && scene.characterIds.length > 0}, ${scene.characterIds}::uuid[], ${scene.costume.slice(0, 500)},
+            ${scene.location.slice(0, 200)}, ${scene.timeOfDay.slice(0, 24)}, ${scene.lyric.slice(0, 300)},
+            ${scene.lipSync && scene.characterIds.length > 0 ? 'PERFORMANCE' : scene.mode === 'PERFORMANCE' ? 'NARRATIVE' : (scene.mode ?? null)},
+            ${scene.lipSync ? (scene.emotion ?? null) : null}, ${intensityLevel(scene.intensity)}, ${json(speed === 1 ? {} : { speed })})`;
+      }
+    });
+    return { board, oldTakes };
   });
   await studio.dropTakeFiles(workspaceId, projectId, oldTakes);
   await sql`UPDATE studio_projects SET brief = ${json({ ...project.brief, script: board.logline.slice(0, 12_000) })}, updated_at = now() WHERE id = ${projectId}`;
   await autoApprove(projectId);
   return view(auth, workspaceId, projectId);
+}
+
+/**
+ * Continuity, the way a script supervisor keeps it: consecutive scenes in the same place with the
+ * same people keep the same wardrobe (outfit, colours, hair, makeup, polish), so a glamorous lead
+ * doesn't turn up ordinary in the next shot of the same moment. A new place starts a new look.
+ */
+function holdContinuity(scenes: { location: string; costume: string; characterIds: string[] }[]): void {
+  const place = (text: string): string => text.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+  for (let index = 1; index < scenes.length; index += 1) {
+    const before = scenes[index - 1]!;
+    const scene = scenes[index]!;
+    const sameCast = scene.characterIds.length > 0 && scene.characterIds.every((id) => before.characterIds.includes(id) || !before.characterIds.length);
+    if (before.costume && place(before.location) && place(before.location) === place(scene.location) && sameCast) scene.costume = before.costume;
+  }
 }
 
 /**
