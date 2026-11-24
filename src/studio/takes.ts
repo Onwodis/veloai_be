@@ -305,7 +305,9 @@ export async function runTake(takeId: string): Promise<void> {
   try {
     /* KEYFRAME ---------------------------------------------------------- */
     let frameKey = take.keyframeKey;
-    let usedKeyframeModel = false;
+    // A first frame made by the keyframe model on an earlier (failed, never charged) attempt is
+    // reused, not made again: it is charged once, when this take finishes.
+    let usedKeyframeModel = Boolean(frameKey && take.outputs?.['KEYFRAME']);
     if (!frameKey && !spec.edit) {
       const useIdentity = spec.featuresSubject && spec.identityKeys.length > 0 && models.keyframe.enabled;
       if (useIdentity || spec.sceneKey) {

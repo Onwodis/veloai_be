@@ -152,7 +152,7 @@ export async function reviewTake(takeId: string, force = false): Promise<void> {
       { type: 'text', text: `Frames from the shot (start → end):` },
       ...frames,
       ...(references.some(Boolean) ? [{ type: 'text' as const, text: 'Cast reference photos:' }, ...references.filter((block): block is NonNullable<typeof block> => Boolean(block))] : []),
-    ]);
+    ], { cache: true });
 
     const merged = [...issues, ...data.issues.filter((issue) => !issues.some((known) => known.kind === issue.kind && known.detail === issue.detail))];
     const flagged = merged.some((issue) => issue.severity !== 'low') || data.score <= 5;

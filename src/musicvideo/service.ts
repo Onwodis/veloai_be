@@ -37,7 +37,7 @@ import { publishProgress } from '../realtime/events.js';
 import { arrange, fxFilters, isIdentityArrangement, mixDuration, renderMix, transcribeSong, transcriptionPrompt, videoFrames, type AudioEdits, type AudioTrack, type Clip, type Lyrics, type Region, type TrackFx } from './audio.js';
 import type { CharacterAttributes, CharacterRow, Costume } from './cast.js';
 import { meContext } from '../likeness/service.js';
-import { castCharacter, correctLyrics, detectPeople, discuss, expandScene, polishLyrics, profileVoice, proofreadLyrics, rewriteScenes, storyboard, suggestSceneTexts, type DirectorContext } from './director.js';
+import { castCharacter, correctLyrics, detectPeople, discuss, expandScene, polishLyrics, profileVoice, proofreadLyrics, rewriteScenes, storyboard, suggestSceneTexts, fixSceneContent, type DirectorContext } from './director.js';
 import { polishProject, type PolishReport } from './polish.js';
 import { dismissReview, reviewTake } from './review.js';
 import type { ProjectCategory } from '../config/categories.js';
@@ -46,6 +46,7 @@ import { ANALYSIS_VERSION, analyseAudio, type AudioAnalysis } from './analysis.j
 import { directionSchema, lockToSong, parseDirection, placeText, songContext, songMapText, type Direction } from './songmap.js';
 import { parseTitles, titlesSchema, type Titles } from './titles.js';
 import { TEXT_TEMPLATES } from '../media/textfx.js';
+import { checkContent, isContentFlag } from '../studio/contentCheck.js';
 
 export const STAGES = ['SONG', 'SOUND', 'CHARACTERS', 'SCENES', 'DISCUSSION', 'STORYBOARD', 'SHOOT', 'MASTER'] as const;
 export type Stage = (typeof STAGES)[number];
@@ -608,6 +609,29 @@ export async function startScriptRegeneration(auth: AuthContext, workspaceId: st
     }
   })();
   return view(auth, workspaceId, projectId);
+}
+
+/**
+ * "Fix it": the director rewrites a scene the film engine refused for its content (or the free check
+ * flags), changing only the likely triggers. Saved straight onto the scene (approval kept); charged
+ * like a director reply.
+ */
+export async function fixContent(auth: AuthContext, workspaceId: string, projectId: string, sceneId: string) {
+  await access(auth, workspaceId, true);
+  const { project, mv } = await load(workspaceId, projectId);
+  assertStage(mv, ...SCENE_STAGES);
+  const [scene] = await sql<SceneRow[]>`SELECT * FROM studio_scenes WHERE id = ${sceneId} AND project_id = ${projectId}`;
+  if (!scene) throw AppError.notFound('Scene');
+  const [last] = await sql<{ error: string | null }[]>`SELECT error FROM studio_takes WHERE scene_id = ${sceneId} AND status <> 'CANCELED' ORDER BY created_at DESC LIMIT 1`;
+  const refused = isContentFlag(last?.error);
+  const risks = checkContent(scene.prompt, scene.description, scene.costume);
+  const { costs } = await getStudioSettings();
+  const fix = await charged(auth, workspaceId, projectId, 'MV_CHAT', costs.mvChat, `Music video · ${project.title.slice(0, 50)}: scene fixed for the content checker`, async () =>
+    fixSceneContent({ prompt: scene.prompt ?? scene.description, description: scene.description, costume: scene.costume }, risks, refused),
+  );
+  await writeScene(projectId, sceneId, { prompt: fix.prompt.slice(0, 2000), description: fix.description.slice(0, 2000), costume: fix.costume.slice(0, 500) || (scene.costume ?? '') }, true);
+  await touch(projectId);
+  return { changes: fix.changes.slice(0, 8), note: fix.note, project: await view(auth, workspaceId, projectId) };
 }
 
 /** "Write it for me": three on-screen text options for a scene, in a template's style (charged like a director reply). */

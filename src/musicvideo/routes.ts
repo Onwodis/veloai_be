@@ -411,6 +411,12 @@ musicVideoRouter.patch('/:projectId/scenes/:sceneId', validate({ params: scenePa
   const { workspaceId, projectId, sceneId } = p(res, sceneParams);
   return { project: await director.updateScene(requireAuth(req), workspaceId, projectId, sceneId, validBody(req, sceneSchema)) };
 }));
+/* "Fix it": rewrite a scene the content checker refused (or may refuse), changing only the triggers. */
+musicVideoRouter.post('/:projectId/scenes/:sceneId/content-fix', validate({ params: sceneParams }), send(async (req, res) => {
+  const { workspaceId, projectId, sceneId } = p(res, sceneParams);
+  return director.fixContent(requireAuth(req), workspaceId, projectId, sceneId);
+}));
+
 /* "Write it for me": on-screen text options for a scene, in a template's style. */
 const textIdeasSchema = z.strictObject({ template: z.string().trim().min(1).max(40), brief: z.string().trim().max(400).optional() });
 musicVideoRouter.post('/:projectId/scenes/:sceneId/texts/suggest', validate({ params: sceneParams, body: textIdeasSchema }), send(async (req, res) => {

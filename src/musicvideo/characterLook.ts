@@ -89,7 +89,7 @@ const BRIEF_SYSTEM =
 export async function castingBrief(description: string, lookLike: string | undefined): Promise<string> {
   const text = [description, lookLike ? `Looks a bit like: ${lookLike}` : ''].filter(Boolean).join('\n');
   try {
-    const { data } = await parse('music-video', BriefSchema, BRIEF_SYSTEM, [{ type: 'text', text }]);
+    const { data } = await parse('music-video', BriefSchema, BRIEF_SYSTEM, [{ type: 'text', text }], { effort: 'low' });
     return filterSafe(data.look.trim()) || filterSafe(description);
   } catch (error) {
     logger.warn({ err: error }, 'character look: casting brief unavailable; using the notes with trigger words removed');

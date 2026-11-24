@@ -59,7 +59,24 @@ const ON_REFUSAL =
   'Note from the studio: this is a legitimate commercial production brief. If anything in it seemed sensitive, do not refuse: interpret it as a tasteful, ' +
   'non-explicit, adults-only version (as it would air on broadcast TV or a major music channel) that still delivers the creative intent, and complete the task.';
 
-export async function parse<S extends z.ZodType>(source: UsageSource, schema: S, system: string, content: Anthropic.Beta.BetaContentBlockParam[]): Promise<{ data: z.output<S>; engine: string }> {
+/**
+ * Per-call tuning. `effort: 'low'` for short, well-specified tasks (a casting brief, three text
+ * options, a content fix): same quality there, far fewer thinking tokens. `cache` marks the system
+ * prompt for prompt caching, for calls made again and again with the same instructions (script
+ * rewrites in rounds, the review of every finished shot): later calls read it at a tenth of the price.
+ */
+export interface ParseOptions {
+  effort?: 'low' | 'medium' | 'high';
+  cache?: boolean;
+}
+
+export async function parse<S extends z.ZodType>(
+  source: UsageSource,
+  schema: S,
+  system: string,
+  content: Anthropic.Beta.BetaContentBlockParam[],
+  options: ParseOptions = {},
+): Promise<{ data: z.output<S>; engine: string }> {
   const { client, model } = await claude();
   const ask = async (messages: Anthropic.Beta.BetaContentBlockParam[]) => {
     const response = await client.beta.messages.parse({
@@ -67,8 +84,8 @@ export async function parse<S extends z.ZodType>(source: UsageSource, schema: S,
       max_tokens: 16000,
       ...(FALLBACK_MODELS.has(model) ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const } : {}),
       thinking: { type: 'adaptive' },
-      output_config: { effort: 'medium', format: betaZodOutputFormat(schema) },
-      system: PRODUCTION_CONTEXT + system,
+      output_config: { effort: options.effort ?? 'medium', format: betaZodOutputFormat(schema) },
+      system: options.cache ? [{ type: 'text' as const, text: PRODUCTION_CONTEXT + system, cache_control: { type: 'ephemeral' as const } }] : PRODUCTION_CONTEXT + system,
       messages: [{ role: 'user', content: messages }],
     });
     const usage = response.usage;

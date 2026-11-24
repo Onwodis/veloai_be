@@ -354,6 +354,7 @@ export async function expandScene(context: DirectorContext, draft: { kind: strin
         text: `${contextText(context)}\n\nScene type: ${draft.kind}.\n<scene_idea>${draft.description}</scene_idea>${draft.notes ? `\n<artist_edits>${draft.notes}</artist_edits>` : ''}`,
       },
     ],
+    { cache: true },
   );
   const { characterIndexes, ...rest } = data;
   return { ...rest, durationSec: clampDuration(rest.durationSec), characterIds: idsFor(characterIndexes, context), engine };
@@ -731,6 +732,7 @@ export async function rewriteScenes(
           "Stay true to the artist's vision, mood, cast and place. Set lipSync true exactly for PERFORMANCE scenes. " +
           `${PRO_RULES} ${RULES} ${shotGuide}`,
         [{ type: 'text', text: `${contextText(board)}\n\n${used ? `<titles_taken>${used}</titles_taken>\n` : ''}<rewrite>\n${slots}\n</rewrite>` }],
+        { cache: true },
       );
     const { data } = await ask().catch(() => ask());
     data.scenes.forEach((item, position) => {
@@ -811,8 +813,49 @@ export async function suggestSceneTexts(
           `<brief>${brief.slice(0, 400) || 'none: choose what suits the scene'}</brief>`,
       },
     ],
+  { effort: 'low' },
   );
   return data.options.map((option) => option.trim()).filter(Boolean).slice(0, 3);
+}
+
+/* ------------------------------------------------------------------ content fix */
+
+const ContentFixSchema = z.object({
+  prompt: z.string().describe('The scene prompt rewritten so image/video safety filters accept it, same shot, story, place, cast and mood'),
+  description: z.string().describe('The scene description, rewritten the same way (short)'),
+  costume: z.string().describe('The wardrobe, rewritten only if it had a trigger; otherwise exactly as given'),
+  changes: z.array(z.string()).describe('Each change in plain words for the artist, e.g. "holstered sidearms → bodyguards with earpieces"'),
+  note: z.string().describe('One or two sentences for the artist: what most likely triggered the filter and how the new version keeps the idea'),
+});
+
+/**
+ * "Fix it": rewrites a scene that an engine's content checker refused (or that the free check
+ * flags), changing only what filters commonly block and keeping everything else of the scene.
+ */
+export async function fixSceneContent(
+  scene: { prompt: string; description: string; costume: string | null },
+  risks: { label: string; words: string[]; suggestion: string }[],
+  refused: boolean,
+): Promise<z.infer<typeof ContentFixSchema>> {
+  const { data } = await parse(
+    'music-video',
+    ContentFixSchema,
+    `You are ${env.BOT_NAME}, the AI director. ${refused ? "The film engine's content checker refused this music-video scene." : 'This music-video scene may be refused by the film engine\'s content checker.'} ` +
+      'Image and video models block weapons, smoking and drugs, gore, sexual or body-part wording, anything suggesting minors, hate symbols and self-harm, and sometimes ' +
+      'a provocative mix (e.g. a revealing outfit plus a suggestive action). Rewrite the scene so it passes, changing as little as possible: keep the shot, camera move, ' +
+      "place, light, cast, story beat, energy and the artist's style; replace each trigger with a visual that keeps the same meaning (power, danger, desire, cool). " +
+      'Never add new triggers. Keep names as they are.',
+    [
+      {
+        type: 'text',
+        text:
+          `<prompt>${scene.prompt.slice(0, 2000)}</prompt>\n<description>${scene.description.slice(0, 800)}</description>\n<costume>${(scene.costume ?? '').slice(0, 500)}</costume>\n` +
+          `<likely_triggers>${risks.map((risk) => `${risk.label}: ${risk.words.join(', ')} (idea: ${risk.suggestion})`).join('\n') || 'none found by the word check: look for a provocative combination'}</likely_triggers>`,
+      },
+    ],
+    { effort: 'low' },
+  );
+  return data;
 }
 
 /* ------------------------------------------------------------------ lyrics */

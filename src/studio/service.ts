@@ -10,7 +10,7 @@
  *   6. assemble: enhance, join with transitions, grade, master (token-gated)
  */
 import type { AuthContext } from '../middleware/authenticate.js';
-import { deleteObject, deletePrefix, headObject, keys, presignPut, readUrl } from '../services/storage.service.js';
+import { copyObject, deleteObject, deletePrefix, headObject, keys, presignPut, readUrl } from '../services/storage.service.js';
 import { withMoves } from '../moves/prompt.js';
 import { referenceView, withReference } from './sceneReference.js';
 import { releaseSystem, reserveTokens, settleSystem } from '../services/token.service.js';
@@ -35,6 +35,7 @@ import { sceneCasts, type SceneCast } from '../musicvideo/cast.js';
 import { parseDirection, placeText, songContext } from '../musicvideo/songmap.js';
 import { cutToRange, syncPlan } from '../musicvideo/sync.js';
 import { ACTIVE_TAKE, DEFAULT_FINISH, type AssetRow, type Finish, type Identity, type ProjectRow, type SceneRow, type TakeRow, type TakeSpec } from './types.js';
+import { checkContent, contentAdvice, isContentFlag } from './contentCheck.js';
 
 /* ------------------------------------------------------------------ music rhythm for prompts */
 
@@ -90,11 +91,15 @@ type TakeListRow = Pick<TakeRow, 'id' | 'sceneId' | 'status' | 'keyframeKey' | '
   /** A text card's background (musicvideo/textCard.ts). */
   card: Record<string, unknown> | null;
   hasOutputs: boolean;
+  /** A failed take's script (prompt, description, identity), for the content advice. */
+  failedText: string | null;
 };
 
 const takeListQuery = (projectId: string) => sql<TakeListRow[]>`
   SELECT id, scene_id, status, keyframe_key, video_key, thumb_key, duration_sec, cost, error, engine, review, created_at, finished_at,
-    spec->'edit' AS edit, spec->'card' AS card, (outputs IS NOT NULL AND outputs <> '{}'::jsonb) AS has_outputs
+    spec->'edit' AS edit, spec->'card' AS card, (outputs IS NOT NULL AND outputs <> '{}'::jsonb) AS has_outputs,
+    CASE WHEN status = 'FAILED' THEN concat_ws(E'
+', spec->>'prompt', spec->>'description', spec->>'identityProfile') END AS failed_text
   FROM studio_takes WHERE project_id = ${projectId} AND status <> 'CANCELED' ORDER BY created_at`;
 
 async function takeView(take: TakeListRow) {
@@ -107,7 +112,9 @@ async function takeView(take: TakeListRow) {
     card: take.card ?? null,
     durationSec: take.durationSec,
     cost: take.cost,
-    error: hideEngine(take.error),
+    error: isContentFlag(take.error) ? 'The film engine refused this scene: its content checker flagged it.' : hideEngine(take.error),
+    // Refused for its content: what most likely triggered it and what to change (free, no AI call).
+    contentAdvice: take.status === 'FAILED' && isContentFlag(take.error) ? contentAdvice(take.failedText) : null,
     engine: hideEngine(take.engine),
     // VeloBot's review (music videos): flags + proposed fixes for the storyboard.
     review: take.review
@@ -216,6 +223,8 @@ async function fullView(project: ProjectRow, preloaded: { assets?: AssetRow[] } 
         approvedAt: iso(scene.approvedAt ?? null),
         shotApprovedAt: iso(scene.shotApprovedAt ?? null),
         startsAt: starts[index] ?? 0,
+        // Words the engines' content filters often refuse, flagged before a take is paid for.
+        contentRisks: checkContent(scene.prompt, scene.description, scene.costume),
         takes: await Promise.all(takes.filter((take) => take.sceneId === scene.id).map(takeView)),
       })),
     ),
@@ -787,8 +796,20 @@ export async function generate(auth: AuthContext, workspaceId: string, projectId
   await assertScenesIdle(projectId, specs.map((item) => item.scene.id));
   await assertStorage(auth, bytes, 'these takes');
 
+  // A failed take of the same scene and the very same spec already paid the engine for its first
+  // frame: the next take starts from it instead of paying for it again (same script = same frame).
+  const savedFrames = new Map<string, { keyframeKey: string; outputs: Record<string, unknown> }>();
+  for (const item of specs) {
+    const [failed] = await sql<{ keyframeKey: string; outputs: Record<string, unknown> }[]>`
+      SELECT keyframe_key, outputs FROM studio_takes
+      WHERE scene_id = ${item.scene.id} AND status = 'FAILED' AND keyframe_key IS NOT NULL AND outputs ? 'KEYFRAME' AND spec = ${json(item.spec)}::jsonb
+      ORDER BY created_at DESC LIMIT 1`;
+    if (failed) savedFrames.set(item.scene.id, failed);
+  }
+
   const { reservation } = await reserveTokens(auth, workspaceId, 'STUDIO_TAKES', total, { projectId, scenes: specs.length, takesPerScene });
   const ids: string[] = [];
+  const reused: { takeId: string; from: string }[] = [];
   try {
     await sql.begin(async (tx) => {
       // Checked again under a per-project lock: two requests arriving together are serialised,
@@ -802,12 +823,27 @@ export async function generate(auth: AuthContext, workspaceId: string, projectId
             INSERT INTO studio_takes (scene_id, project_id, workspace_id, spec, cost, reservation_id)
             VALUES (${item.scene.id}, ${projectId}, ${workspaceId}, ${json(item.spec)}, ${item.cost}, ${reservation.id}) RETURNING id`;
           ids.push(row!.id);
+          const saved = savedFrames.get(item.scene.id);
+          if (saved) {
+            const to = keys.studioTake(workspaceId, projectId, row!.id, 'keyframe.png');
+            await tx`UPDATE studio_takes SET keyframe_key = ${to}, outputs = ${json({ KEYFRAME: saved.outputs['KEYFRAME'] })} WHERE id = ${row!.id}`;
+            reused.push({ takeId: row!.id, from: saved.keyframeKey });
+          }
         }
       }
     });
   } catch (error) {
     await releaseSystem(reservation.id, workspaceId).catch(() => undefined);
     throw error;
+  }
+  // The reused first frames are copied into the new takes (the failed take can be deleted later); if a
+  // copy fails the take simply makes its own frame.
+  for (const item of reused) {
+    const to = keys.studioTake(workspaceId, projectId, item.takeId, 'keyframe.png');
+    await copyObject(item.from, to).catch(async (error: unknown) => {
+      logger.warn({ err: error, takeId: item.takeId }, 'saved first frame not copied; the take makes a new one');
+      await sql`UPDATE studio_takes SET keyframe_key = NULL, outputs = NULL WHERE id = ${item.takeId}`;
+    });
   }
   await sql`UPDATE studio_projects SET updated_at = now(), status = CASE WHEN status = 'FAILED' THEN 'DRAFT' ELSE status END WHERE id = ${projectId}`;
   for (const id of ids) await enqueueTake(id);
