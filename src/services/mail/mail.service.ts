@@ -356,7 +356,7 @@ export async function sendMail(to: string, raw: RenderedMail, credentialId?: str
 
   const from = row.fromName ? `"${row.fromName.replace(/"/g, '')}" <${row.fromAddress}>` : row.fromAddress;
   try {
-    const message = { from, to, subject: mail.subject, html: mail.html, text: mail.text };
+    const message = { from, to, subject: mail.subject, html: mail.html, text: mail.text, ...(mail.attachments?.length ? { attachments: mail.attachments } : {}) };
     const info = (await transport.sendMail(message).catch(async (first: unknown) => {
       const reason = describeError(first);
       // A pooled connection can go stale, or the network blip: one fresh retry; on a host that

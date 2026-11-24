@@ -10,6 +10,8 @@ export interface RenderedMail {
   html: string;
   text: string;
   template: string;
+  /** Inline images (the logo, see brand.ts), referenced from the HTML as cid:… */
+  attachments?: { filename: string; path: string; cid: string; contentType: string }[];
 }
 
 function escapeHtml(value: string): string {

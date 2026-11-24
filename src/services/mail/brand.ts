@@ -4,10 +4,14 @@
  * reminder to check spam. Templates (templates.ts) only leave markers; filling them here means every
  * email is branded and addressed the same way, whoever sends it.
  *
- * Logo: the super admin's generated logo when one is live (its pale version, the emails are dark),
- * else the built-in wordmark from the web app's /images. The address must be public and permanent
- * (an email is opened days later), so a private/signed storage link is never used.
+ * Logo: always the app's wordmark (data/brand/mail-logo.png), attached to the message itself as an
+ * inline image (cid), so it shows without depending on a public URL (dev's WEB_APP_URL is localhost,
+ * and many clients block remote images). The text part and clients that drop inline images fall
+ * back to the alt text.
  */
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { env } from '../../config/env.js';
 import { sql } from '../../studio/sql.js';
 import { logger } from '../../utils/logger.js';
@@ -17,21 +21,15 @@ export const MARK = { logo: '<!--mail:logo-->', greeting: '<!--mail:greeting-->'
 
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
 
-let logoCache: { url: string; at: number } | null = null;
+const LOGO_FILE = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'data', 'brand', 'mail-logo.png');
+const LOGO_CID = 'app-logo@mail';
+const hasLogoFile = existsSync(LOGO_FILE);
+if (!hasLogoFile) logger.warn({ file: LOGO_FILE }, 'mail logo file missing: emails link the hosted logo instead');
 
-/** Public, permanent URL of the logo for emails (cached for 5 minutes). */
-async function logoUrl(): Promise<string> {
-  if (logoCache && Date.now() - logoCache.at < 5 * 60_000) return logoCache.url;
-  let url = `${env.WEB_APP_URL.replace(/\/+$/, '')}/images/velo-nav-dark.png`;
-  try {
-    const { activeLogoKey } = await import('../../marketing/brandLogo.js');
-    const key = await activeLogoKey();
-    if (key && env.CF_R2_PUBLIC_URL) url = `${env.CF_R2_PUBLIC_URL.replace(/\/+$/, '')}/${key.split('/').map(encodeURIComponent).join('/')}`;
-  } catch (error) {
-    logger.warn({ err: error }, 'mail logo: using the built-in logo');
-  }
-  logoCache = { url, at: Date.now() };
-  return url;
+/** The logo in an email: the attached file (cid), else the copy the web app hosts. */
+function logoSource(): { src: string; attachment: NonNullable<RenderedMail['attachments']>[number] | null } {
+  if (hasLogoFile) return { src: `cid:${LOGO_CID}`, attachment: { filename: 'logo.png', path: LOGO_FILE, cid: LOGO_CID, contentType: 'image/png' } };
+  return { src: `${env.WEB_APP_URL.replace(/\/+$/, '')}/brand/logo-still.png`, attachment: null };
 }
 
 /** The recipient's first name when the address belongs to an account (sign-up codes go to people without one yet). */
@@ -50,13 +48,14 @@ export const SPAM_TIP = "Can't find our emails? Check your spam or junk folder a
 
 /** Fills the markers: logo, "Hi {name}," and the footer (sent to / spam tip). Text part too. */
 export async function personalize(to: string, mail: RenderedMail): Promise<RenderedMail> {
-  const [logo, name] = await Promise.all([logoUrl(), firstName(to)]);
+  const { src: logo, attachment } = logoSource();
+  const name = await firstName(to);
   const appName = escapeHtml(env.APP_NAME);
   const hello = name ? `Hi ${name},` : 'Hi there,';
   const html = mail.html
     .replace(
       MARK.logo,
-      `<img src="${escapeHtml(logo)}" alt="${appName}" height="36" style="display:block;height:36px;width:auto;max-width:220px;border:0;outline:none;text-decoration:none;color:#22d3ee;font-size:16px;letter-spacing:3px">`,
+      `<img src="${escapeHtml(logo)}" alt="${appName}" width="240" height="45" style="display:block;width:240px;max-width:100%;height:auto;border:0;outline:none;text-decoration:none;color:#22d3ee;font-size:16px;letter-spacing:3px">`,
     )
     .replace(MARK.greeting, `<tr><td style="font-size:15px;line-height:24px;color:#e5e7eb;padding-bottom:8px">${escapeHtml(hello)}</td></tr>`)
     .replace(
@@ -65,5 +64,5 @@ export async function personalize(to: string, mail: RenderedMail): Promise<Rende
         `This email was sent to <span style="color:#9ca3af">${escapeHtml(to)}</span> by ${appName}.<br>${escapeHtml(SPAM_TIP)}</td></tr>`,
     );
   const text = `${hello}\n\n${mail.text}\n\n--\nThis email was sent to ${to} by ${env.APP_NAME}.\n${SPAM_TIP}`;
-  return { ...mail, html, text };
+  return { ...mail, html, text, attachments: [...(mail.attachments ?? []), ...(attachment && html.includes(`cid:${LOGO_CID}`) ? [attachment] : [])] };
 }
