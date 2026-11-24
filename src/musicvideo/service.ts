@@ -2410,6 +2410,8 @@ export async function onTakeFinished(takeId: string): Promise<void> {
   if (!take) return;
   // VeloBot checks every finished shot in the background (weak, off-story, lip sync, looks AI…).
   if (take.status === 'READY') void reviewTake(takeId).catch(() => undefined);
+  // A regenerated video replaces the one on screen (made from the scene's current script), unless the scene is locked.
+  if (take.status === 'READY') await sql`UPDATE studio_scenes SET selected_take_id = ${takeId} WHERE id = ${take.sceneId} AND shot_approved_at IS NULL`;
   await advanceSequence(take.projectId, take).catch((error: unknown) => logger.error({ err: error, takeId }, 'generate-all step failed'));
   const [mv] = await sql<MvRow[]>`SELECT * FROM mv_projects WHERE project_id = ${take.projectId}`;
   if (!mv?.autoMode || mv.stage !== 'SHOOT') return;

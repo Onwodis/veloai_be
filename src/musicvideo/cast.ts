@@ -71,6 +71,8 @@ export interface SceneCast {
   elements: { name: string; keys: string[] }[];
   profile: string;
   style?: string | undefined;
+  /** Cast members with no photos yet: nothing would hold their face from shot to shot. */
+  missing?: string[];
 }
 
 export const ROLE_LABEL: Record<CharacterRow['role'], string> = {
@@ -98,8 +100,8 @@ export async function sceneCasts(projectId: string, scenes: Pick<SceneRow, 'id' 
   const approved = await sql<{ sceneId: string; position: number; characterIds: string[]; costume: string | null; keyframeKey: string }[]>`
     SELECT s.id AS scene_id, s.position, s.character_ids, s.costume, t.keyframe_key FROM studio_scenes s
     JOIN studio_takes t ON t.id = s.selected_take_id AND t.status = 'READY' AND t.keyframe_key IS NOT NULL
-    WHERE s.project_id = ${projectId} AND s.shot_approved_at IS NOT NULL AND cardinality(s.character_ids) = 1
-    ORDER BY s.position`;
+    WHERE s.project_id = ${projectId} AND (s.shot_approved_at IS NOT NULL OR s.approved_at IS NOT NULL) AND cardinality(s.character_ids) = 1
+    ORDER BY (s.shot_approved_at IS NULL), s.position`;
   const wardrobe = (value: string | null | undefined): string => (value ?? '').trim().toLowerCase();
   const anchorFor = (characterId: string, sceneId: string, costume: string | null | undefined): string | null =>
     approved.find((row) => row.characterIds[0] === characterId && row.sceneId !== sceneId && wardrobe(row.costume) === wardrobe(costume))?.keyframeKey ?? null;
@@ -128,7 +130,8 @@ export async function sceneCasts(projectId: string, scenes: Pick<SceneRow, 'id' 
       .concat(cast.length > 1 ? ['Reference photos are given in the same order as the people above; keep every person distinct and recognisable.'] : [])
       .join('\n');
     const elements = cast.filter((character) => character.referenceKeys.length > 0).map((character) => ({ name: character.name, keys: character.referenceKeys.slice(0, 4) }));
-    out.set(scene.id, { referenceKeys, elements, profile });
+    const missing = cast.filter((character) => character.referenceKeys.length === 0).map((character) => character.name);
+    out.set(scene.id, { referenceKeys, elements, profile, ...(missing.length ? { missing } : {}) });
   }
   return out;
 }

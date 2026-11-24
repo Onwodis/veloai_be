@@ -130,6 +130,19 @@ async function buildTransport(row: SmtpCredential, override?: { port: number }):
   });
 }
 
+/**
+ * Some hosts block outgoing SMTP on port 465 (Hetzner Cloud does by default, with 25), so the
+ * connection just times out there while it works from a laptop. Port 587 (STARTTLS) is allowed:
+ * a 465 account that can't connect is retried on 587, and that port is remembered for this process.
+ */
+const FALLBACK_PORT = 587;
+const portFallback = new Map<string, number>();
+const CONNECT_FAILURE = /connection timeout|ETIMEDOUT|ECONNREFUSED|ECONNRESET|Greeting never received|socket hang up/i;
+
+function portFor(row: SmtpCredential): number | undefined {
+  return portFallback.get(row.id);
+}
+
 /** Network blips worth a second attempt (not wrong passwords). */
 const TRANSIENT = /timed? ?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|socket hang up|Greeting never received/i;
 
@@ -262,8 +275,18 @@ export async function verifyCredential(id: string): Promise<PublicSmtpCredential
   for (const attempt of [0, 1, 2]) {
     let transport: Transporter | null = null;
     try {
-      transport = await buildTransport(row);
-      await transport.verify();
+      const port = portFor(row);
+      transport = await buildTransport(row, port ? { port } : undefined);
+      try {
+        await transport.verify();
+      } catch (first) {
+        if (row.port !== 465 || port || !CONNECT_FAILURE.test(describeError(first))) throw first;
+        transport.close();
+        transport = await buildTransport(row, { port: FALLBACK_PORT });
+        await transport.verify();
+        portFallback.set(row.id, FALLBACK_PORT);
+        logger.warn({ credentialId: row.id }, 'smtp: port 465 unreachable from this host; using 587 (STARTTLS)');
+      }
       ok = true;
       error = null;
       break;
@@ -307,10 +330,11 @@ async function activeTransport(): Promise<{ transport: Transporter; row: SmtpCre
   const row =
     (await prisma.smtpCredential.findFirst({ where: { isActive: true } })) ?? (await prisma.smtpCredential.findFirst({ where: { source: 'ENV' } }));
   if (!row) throw new AppError(503, 'MAIL_UNAVAILABLE', 'Email is not configured yet. Contact support.');
-  const key = `${row.id}:${row.updatedAt.getTime()}`;
+  const port = portFor(row);
+  const key = `${row.id}:${row.updatedAt.getTime()}:${port ?? row.port}`;
   if (cachedTransport?.key !== key) {
     cachedTransport?.transport.close();
-    cachedTransport = { key, transport: await buildTransport(row), row };
+    cachedTransport = { key, transport: await buildTransport(row, port ? { port } : undefined), row };
   }
   return cachedTransport;
 }
@@ -324,7 +348,8 @@ export async function sendMail(to: string, raw: RenderedMail, credentialId?: str
     const found = await prisma.smtpCredential.findUnique({ where: { id: credentialId } });
     if (!found) throw AppError.notFound('SMTP credential');
     row = found;
-    transport = await buildTransport(found);
+    const port = portFor(found);
+    transport = await buildTransport(found, port ? { port } : undefined);
   } else {
     ({ transport, row } = await activeTransport());
   }
@@ -333,12 +358,20 @@ export async function sendMail(to: string, raw: RenderedMail, credentialId?: str
   try {
     const message = { from, to, subject: mail.subject, html: mail.html, text: mail.text };
     const info = (await transport.sendMail(message).catch(async (first: unknown) => {
-      // A pooled connection can go stale, or the network blip: one fresh retry.
-      if (!TRANSIENT.test(describeError(first))) throw first;
+      const reason = describeError(first);
+      // A pooled connection can go stale, or the network blip: one fresh retry; on a host that
+      // blocks port 465 that retry goes to 587 (STARTTLS) and the port is kept for later mail.
+      if (!TRANSIENT.test(reason)) throw first;
       if (!credentialId) cachedTransport = null;
-      const fresh = await buildTransport(row);
+      const switchPort = row.port === 465 && !portFor(row) && CONNECT_FAILURE.test(reason);
+      const fresh = await buildTransport(row, switchPort ? { port: FALLBACK_PORT } : portFor(row) ? { port: portFor(row)! } : undefined);
       try {
-        return await fresh.sendMail(message);
+        const sent = await fresh.sendMail(message);
+        if (switchPort) {
+          portFallback.set(row.id, FALLBACK_PORT);
+          logger.warn({ credentialId: row.id }, 'smtp: port 465 unreachable from this host; mail now goes over 587 (STARTTLS)');
+        }
+        return sent;
       } finally {
         fresh.close();
       }

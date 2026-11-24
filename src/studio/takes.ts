@@ -21,7 +21,7 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ffmpeg, probe } from '../media/ffmpeg.js';
-import { deletePrefix, downloadToFile, keys, readUrl, uploadFile } from '../services/storage.service.js';
+import { deletePrefix, downloadToFile, headObject, keys, readUrl, uploadFile } from '../services/storage.service.js';
 import { releaseSystem, settleSystem, touchReservation } from '../services/token.service.js';
 import { logger } from '../utils/logger.js';
 import { ASPECTS, KINETIC_SHOTS, keyframePrompt, lipSafeShot, motionPrompt, negativePrompt, softDelivery, type Aspect, type PromptInput } from './cinema.js';
@@ -52,6 +52,48 @@ function animationModel(settings: StudioSettings, spec: CostSpec, hasFrame: bool
   return usesReferences(settings, spec) ? settings.models.referenceVideo : settings.models.imageToVideo;
 }
 
+/** Reference models refuse photos under 300 px a side; smaller ones are upscaled to this short side. */
+const REFERENCE_MIN_SIDE = 300;
+const REFERENCE_UPSCALE_SIDE = 640;
+const referenceChecked = new Map<string, string>();
+
+/**
+ * A character photo as a reference the video model accepts. A photo under 300 px on a side (a small
+ * upload or crop) is upscaled once and kept beside the original (`<key>.ref.jpg`), so the take is
+ * not refused with "Image dimensions are too small". Any problem checking it falls back to the original.
+ */
+export async function referenceUrl(key: string): Promise<string> {
+  const known = referenceChecked.get(key);
+  if (known) return readUrl(known);
+  const larger = `${key}.ref.jpg`;
+  if (await headObject(larger).catch(() => null)) {
+    referenceChecked.set(key, larger);
+    return readUrl(larger);
+  }
+  const dir = await mkdtemp(join(tmpdir(), 'ref-'));
+  try {
+    const source = join(dir, 'source');
+    await downloadToFile(key, source);
+    const { width, height } = await probe(source);
+    if (!width || !height || Math.min(width, height) >= REFERENCE_MIN_SIDE) {
+      referenceChecked.set(key, key);
+      return readUrl(key);
+    }
+    const output = join(dir, 'ref.jpg');
+    const scale = width < height ? `${REFERENCE_UPSCALE_SIDE}:-2` : `-2:${REFERENCE_UPSCALE_SIDE}`;
+    await ffmpeg(['-i', source, '-vf', `scale=${scale}:flags=lanczos,setsar=1`, '-frames:v', '1', '-q:v', '2', output]);
+    await uploadFile(larger, output, 'image/jpeg');
+    logger.info({ key, width, height }, 'reference photo under 300 px upscaled for the video model');
+    referenceChecked.set(key, larger);
+    return readUrl(larger);
+  } catch (error) {
+    logger.warn({ err: error, key }, 'reference photo size check failed; using the original');
+    return readUrl(key);
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 /** Kling O1 reference-to-video: start frame + elements share a 7-image budget. */
 const REFERENCE_IMAGE_LIMIT = 7;
 
@@ -72,7 +114,7 @@ async function referenceRequest(
     const people = input.elements.slice(0, 3);
     const perPerson = Math.max(1, Math.floor((REFERENCE_IMAGE_LIMIT - 1) / people.length));
     const groups = people.map((person) => person.keys.slice(0, perPerson));
-    const urls = [frameUrl, ...(await Promise.all(groups.flat().map((key) => readUrl(key))))];
+    const urls = [frameUrl, ...(await Promise.all(groups.flat().map((key) => referenceUrl(key))))];
     let index = 1;
     const named = people.map((person, i) => {
       const tags = groups[i]!.map(() => `<IMAGE_${index++}>`).join(' ');
@@ -93,8 +135,8 @@ async function referenceRequest(
   const elements = await Promise.all(
     people.map(async (person) => {
       const [frontal, ...rest] = person.keys.slice(0, perPerson);
-      const frontalUrl = await readUrl(frontal!);
-      const others = await Promise.all(rest.map((key) => readUrl(key)));
+      const frontalUrl = await referenceUrl(frontal!);
+      const others = await Promise.all(rest.map((key) => referenceUrl(key)));
       // The model needs at least one reference image besides the frontal one.
       return { frontal_image_url: frontalUrl, reference_image_urls: others.length ? others : [frontalUrl] };
     }),
@@ -367,7 +409,7 @@ export async function runTake(takeId: string): Promise<void> {
         const elements = spec.identityElements;
         input = seedanceReferenceRequest(model, {
           frameUrl: await readUrl(frameKey),
-          people: await Promise.all(elements.map(async (person) => ({ name: person.name, urls: await Promise.all(person.keys.slice(0, 3).map((key) => readUrl(key))) }))),
+          people: await Promise.all(elements.map(async (person) => ({ name: person.name, urls: await Promise.all(person.keys.slice(0, 3).map((key) => referenceUrl(key))) }))),
           prompt: (references) => motionPrompt({ ...promptInput, references }),
           negative: negativePrompt(promptInput.lipSync ?? false, { energy: spec.energy, visual: spec.visual, subject: promptInput.featuresSubject, scene: promptInput.scene }),
           duration: duration.param,

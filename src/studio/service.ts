@@ -702,6 +702,16 @@ export async function generate(auth: AuthContext, workspaceId: string, projectId
     };
   };
 
+  // Character consistency: a cast member without photos would be a different person in every shot.
+  const faceless = [...new Set([...casts.values()].flatMap((cast) => cast.missing ?? []))];
+  if (faceless.length) {
+    const names = faceless.length === 1 ? faceless[0]! : `${faceless.slice(0, -1).join(', ')} and ${faceless.at(-1)!}`;
+    throw AppError.badRequest(
+      `${names} ${faceless.length === 1 ? 'has' : 'have'} no photos yet, so ${faceless.length === 1 ? 'they' : 'each'} would look like a different person in every scene. ` +
+        `Open Characters, add photos or press "Create the look" for ${names}, then generate. Nothing was charged.`,
+    );
+  }
+
   const specs = wanted.map((scene) => {
     const cast = casts.get(scene.id);
     if (cast) {
